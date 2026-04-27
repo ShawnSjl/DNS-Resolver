@@ -27,6 +27,8 @@ type Question struct {
 	original *dns.Msg // original query request (from the client)
 	current  *dns.Msg // current query request (to be sent to the outside)
 
+	// TODO: add direct graph
+
 	timer *time.Timer // timer for resending the query
 }
 

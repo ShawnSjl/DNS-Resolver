@@ -10,7 +10,7 @@ import (
 type RecordCache struct {
 	ctx context.Context
 
-	records map[string]*Record
+	records map[string]*Record // use address as the key
 	mutex   sync.RWMutex
 }
 

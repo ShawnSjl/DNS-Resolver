@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/brown-cs1680-s26/final-jiale-xinran/internal/server/cache"
-	"github.com/miekg/dns"
 )
 
 type DNS struct {
@@ -12,12 +11,12 @@ type DNS struct {
 	cancel context.CancelFunc
 
 	// inside
-	sendInsideQueue     chan *dns.Msg
-	receivedInsideQueue chan *dns.Msg
+	sendInsideQueue     *SendInside
+	receivedInsideQueue *ReceiveInside
 
 	// outside
-	sendOutsideQueue     chan *dns.Msg
-	receivedOutsideQueue chan *dns.Msg
+	sendOutsideQueue     *SendOutside
+	receivedOutsideQueue *ReceiveOutside
 
 	// cache
 	cache *cache.RecordCache
