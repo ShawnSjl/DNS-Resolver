@@ -2,8 +2,6 @@ package dns
 
 import (
 	"context"
-
-	"github.com/brown-cs1680-s26/final-jiale-xinran/internal/server/cache"
 )
 
 type DNS struct {
@@ -19,7 +17,7 @@ type DNS struct {
 	receivedOutsideQueue *ReceiveOutside
 
 	// cache
-	cache *cache.RecordCache
+	cache *RecordCache
 
 	// question table
 	questionTable *QuestionTable

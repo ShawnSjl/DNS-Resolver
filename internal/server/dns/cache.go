@@ -1,17 +1,25 @@
-package cache
+package dns
 
 import (
 	"context"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 type RecordCache struct {
 	ctx context.Context
 
-	records map[string]*Record // use address as the key
+	records map[CacheKey]dns.RR
 	mutex   sync.RWMutex
+}
+
+type CacheKey struct {
+	domain string
+	qType  uint16
+	qClass uint16
 }
 
 // ******************** Initialization Interface **********************
@@ -22,7 +30,7 @@ func NewRecordCache(parent context.Context) *RecordCache {
 
 	cache := &RecordCache{
 		ctx:     ctx,
-		records: make(map[string]*Record),
+		records: make(map[CacheKey]dns.RR),
 		mutex:   sync.RWMutex{},
 	}
 
@@ -46,14 +54,14 @@ func (c *RecordCache) StartTTLTimer() {
 
 			case <-timer.C:
 				c.mutex.Lock()
-				var deleteList []string
+				var deleteList []CacheKey
 
 				// Decrement TTL every second for all records
 				for key, record := range c.records {
-					record.TTL--
+					record.Header().Ttl--
 
 					// Check if TTL is 0
-					if record.TTL <= 0 {
+					if record.Header().Ttl <= 0 {
 						deleteList = append(deleteList, key)
 					}
 				}
@@ -70,18 +78,30 @@ func (c *RecordCache) StartTTLTimer() {
 
 // ******************** Interface **********************
 
-func (c *RecordCache) Get(key string) (*Record, bool) {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-
-	return c.records[key], c.records[key] != nil
-}
-
-func (c *RecordCache) Set(record *Record) {
+func (c *RecordCache) Add(rr dns.RR) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	c.records[record.Address] = record
+	key := CacheKey{
+		domain: rr.Header().Name,
+		qType:  rr.Header().Rrtype,
+		qClass: rr.Header().Class,
+	}
+
+	c.records[key] = rr
+}
+
+func (c *RecordCache) Get(domain string, rType uint16, rClass uint16) (dns.RR, bool) {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
+	key := CacheKey{
+		domain: domain,
+		qType:  rType,
+		qClass: rClass,
+	}
+
+	return c.records[key], c.records[key] != nil
 }
 
 func (c *RecordCache) List() string {
@@ -89,7 +109,6 @@ func (c *RecordCache) List() string {
 	defer c.mutex.RUnlock()
 
 	var list []string
-	list = append(list, "Name   Type   Class    TTL   Address")
 
 	for _, record := range c.records {
 		list = append(list, record.String())
