@@ -9,6 +9,10 @@ import (
 	"github.com/miekg/dns"
 )
 
+const (
+	MaxTTL = 60 * 60 * 24 * 7 // maximum TTL in seconds, 7 days
+)
+
 type RecordCache struct {
 	ctx context.Context
 
@@ -89,6 +93,7 @@ func (c *RecordCache) Add(rr dns.RR) {
 		qClass: rr.Header().Class,
 	}
 
+	rr.Header().Ttl = min(rr.Header().Ttl, MaxTTL) // limit TTL to 7 days
 	c.records[key] = rr
 }
 
