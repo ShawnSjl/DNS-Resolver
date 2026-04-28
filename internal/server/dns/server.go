@@ -18,7 +18,7 @@ const (
 	UDP6MTU        = MTU - IPv6HeaderSize - UDPHeaderSize
 )
 
-type DNS struct {
+type Server struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -42,9 +42,9 @@ type DNS struct {
 
 // ******************** Initialization Interface **********************
 
-func NewDNS(parent context.Context) *DNS {
+func NewDNSServer(parent context.Context) *Server {
 	ctx, cancel := context.WithCancel(parent)
-	return &DNS{
+	return &Server{
 		ctx:                  ctx,
 		cancel:               cancel,
 		sendInsideQueue:      NewSendInside(ctx),
@@ -59,7 +59,7 @@ func NewDNS(parent context.Context) *DNS {
 
 // ******************** Server **********************
 
-func (d *DNS) Run(port uint16) {
+func (s *Server) RunIPv4(port uint16) {
 	go func() {
 		// Create a IPV4 UDP socket listening on specified port
 		udpAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("0.0.0.0:%d", port))
@@ -79,7 +79,7 @@ func (d *DNS) Run(port uint16) {
 		buffer := make([]byte, UDP4MTU)
 		for {
 			select {
-			case <-d.ctx.Done():
+			case <-s.ctx.Done():
 				return
 
 			default:
@@ -99,12 +99,17 @@ func (d *DNS) Run(port uint16) {
 					continue
 				}
 
-				log.Println("Received UDP from: ", msg.String())
+				// Send the message to the queue
+				s.receivedInsideQueue.queue <- &msg
 			}
 		}
 	}()
 }
 
-func (d *DNS) Terminate() {
-	d.cancel()
+func (s *Server) RunIPv6(port uint16) {
+	log.Printf("IPv6 DNS server is not supported, port: %d, MTU: %d\n", port, UDP6MTU)
+}
+
+func (s *Server) Terminate() {
+	s.cancel()
 }

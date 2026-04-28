@@ -37,8 +37,10 @@ func main() {
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	dnsServer := dns.NewDNS(rootCtx)
-	dnsServer.Run(uint16(dnsPort))
+	// create DNS server
+	dnsServer := dns.NewDNSServer(rootCtx)
+	dnsServer.RunIPv4(uint16(dnsPort)) // run DNS server in IPv4
+	//dnsServer.RunIPv6(uint16(dnsPort)) // run DNS server in IPv6
 
 	// TODO: handle message from controller interface
 	log.Printf("Controller port: %d", controllerPort)
