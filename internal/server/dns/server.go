@@ -16,6 +16,8 @@ const (
 	IPv6HeaderSize = 40
 	UDP4MTU        = MTU - IPv4HeaderSize - UDPHeaderSize
 	UDP6MTU        = MTU - IPv6HeaderSize - UDPHeaderSize
+
+	QueueSize = 1024
 )
 
 type Server struct {
@@ -23,8 +25,10 @@ type Server struct {
 	cancel context.CancelFunc
 
 	// inside
-	sendInsideQueue     *SendInside
-	receivedInsideQueue *ReceiveInside
+	udpConnIPv4        *net.UDPConn
+	udpConnIPv6        *net.UDPConn
+	insideSendQueue    chan Entry
+	insideReceiveQueue chan Entry
 
 	// outside
 	sendOutsideQueue     *SendOutside
@@ -40,43 +44,67 @@ type Server struct {
 	blocked *Blacklist
 }
 
+type Entry struct {
+	msg  *dns.Msg
+	addr net.Addr
+}
+
 // ******************** Initialization Interface **********************
 
 func NewDNSServer(parent context.Context) *Server {
 	ctx, cancel := context.WithCancel(parent)
-	return &Server{
-		ctx:                  ctx,
-		cancel:               cancel,
-		sendInsideQueue:      NewSendInside(ctx),
-		receivedInsideQueue:  NewReceiveInside(ctx),
-		sendOutsideQueue:     NewSendOutside(ctx),
-		receivedOutsideQueue: NewReceiveOutside(ctx),
-		cache:                NewRecordCache(ctx),
-		questionTable:        NewQuestionTable(ctx),
-		blocked:              NewBlacklist(),
+
+	server := &Server{
+		ctx:                ctx,
+		cancel:             cancel,
+		insideSendQueue:    make(chan Entry, QueueSize),
+		insideReceiveQueue: make(chan Entry, QueueSize),
+		cache:              NewRecordCache(ctx),
+		questionTable:      NewQuestionTable(ctx),
+		blocked:            NewBlacklist(),
 	}
+
+	server.InsideRequestHandler()
+	server.InsideResponseHandler()
+
+	return server
 }
 
 // ******************** Server **********************
 
 func (s *Server) RunIPv4(port uint16) {
-	go func() {
-		// Create a IPV4 UDP socket listening on specified port
-		udpAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("0.0.0.0:%d", port))
-		if err != nil {
-			log.Fatal("Fail to resolve UDP address: ", err)
-		}
-		conn, err := net.ListenUDP("udp4", udpAddr)
-		if err != nil {
-			log.Fatal("Fail to listen UDP: ", err)
-		}
-		defer func(conn *net.UDPConn) {
-			if closeErr := conn.Close(); closeErr != nil {
-				log.Println("Fail to close UDP connection: ", closeErr)
-			}
-		}(conn)
+	// Create a IPV4 UDP socket listening on specified port
+	udpAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("0.0.0.0:%d", port))
+	if err != nil {
+		log.Fatal("Fail to resolve UDP IPv4 address: ", err)
+	}
+	conn, err := net.ListenUDP("udp4", udpAddr)
+	if err != nil {
+		log.Fatal("Fail to listen UDP: ", err)
+	}
+	s.udpConnIPv4 = conn
 
-		buffer := make([]byte, UDP4MTU)
+	s.readFromConn(conn, UDP4MTU)
+}
+
+func (s *Server) RunIPv6(port uint16) {
+	// Create a IPV6 UDP socket listening on specified port
+	udpAddr, err := net.ResolveUDPAddr("udp6", fmt.Sprintf("[::]:%d", port))
+	if err != nil {
+		log.Fatal("Fail to resolve UDP IPv6 address: ", err)
+	}
+	conn, err := net.ListenUDP("udp6", udpAddr)
+	if err != nil {
+		log.Fatal("Fail to listen UDP: ", err)
+	}
+	s.udpConnIPv6 = conn
+
+	s.readFromConn(conn, UDP6MTU)
+}
+
+func (s *Server) readFromConn(conn *net.UDPConn, mtu int) {
+	go func() {
+		buffer := make([]byte, mtu)
 		for {
 			select {
 			case <-s.ctx.Done():
@@ -100,16 +128,152 @@ func (s *Server) RunIPv4(port uint16) {
 				}
 
 				// Send the message to the queue
-				s.receivedInsideQueue.queue <- &msg
+				reqEntry := Entry{
+					msg:  &msg,
+					addr: addr,
+				}
+				s.insideReceiveQueue <- reqEntry
 			}
 		}
 	}()
 }
 
-func (s *Server) RunIPv6(port uint16) {
-	log.Printf("IPv6 DNS server is not supported, port: %d, MTU: %d\n", port, UDP6MTU)
-}
-
 func (s *Server) Terminate() {
 	s.cancel()
+
+	// Close the UDP connections
+	if s.udpConnIPv4 != nil {
+		if closeErr := s.udpConnIPv4.Close(); closeErr != nil {
+			log.Println("Fail to close UDP IPv4 connection: ", closeErr)
+		}
+	}
+	if s.udpConnIPv6 != nil {
+		if closeErr := s.udpConnIPv6.Close(); closeErr != nil {
+			log.Println("Fail to close UDP IPv6 connection: ", closeErr)
+		}
+	}
+}
+
+// ******************** Inside DNS Request Handler **********************
+
+func (s *Server) InsideRequestHandler() {
+	// goroutine to handle the outgoing DNS requests
+	go func() {
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+
+			case reqEntry := <-s.insideReceiveQueue:
+				// Check if the message is a DNS query
+				if len(reqEntry.msg.Question) == 0 {
+					s.handleFormatError(reqEntry.addr, reqEntry.msg)
+					continue
+				}
+
+				// Get question from the message
+				question := reqEntry.msg.Question[0]
+
+				// Check if the domain is blocked
+				if s.blocked.Contains(question.Name) {
+					s.handleBlocked(reqEntry.addr, reqEntry.msg)
+					continue
+				}
+
+				// Check if the cache has the record of the domain
+				cacheKey := CacheKey{
+					domain: question.Name,
+					qType:  question.Qtype,
+					qClass: question.Qclass,
+				}
+				if rr, ok := s.cache.Get(cacheKey); ok {
+					resp := dns.Msg{}
+					resp.SetReply(reqEntry.msg)
+					resp.Answer = append(resp.Answer, rr)
+					entry := Entry{
+						msg:  &resp,
+						addr: reqEntry.addr,
+					}
+					s.insideSendQueue <- entry
+					continue
+				}
+
+				// TODO: add to the question table
+				log.Printf("Question: %s\n", question.Name)
+			}
+		}
+	}()
+}
+
+func (s *Server) handleFormatError(addr net.Addr, req *dns.Msg) {
+	// create a response message
+	resp := dns.Msg{}
+	resp.SetReply(req)
+	resp.Rcode = dns.RcodeFormatError
+
+	entry := Entry{
+		msg:  &resp,
+		addr: addr,
+	}
+	s.insideSendQueue <- entry
+}
+
+func (s *Server) handleBlocked(addr net.Addr, req *dns.Msg) {
+	resp := dns.Msg{}
+	resp.SetReply(req)
+	resp.Rcode = dns.RcodeNameError
+
+	entry := Entry{
+		msg:  &resp,
+		addr: addr,
+	}
+	s.insideSendQueue <- entry
+}
+
+// ******************** Inside DNS Response Handler **********************
+
+func (s *Server) InsideResponseHandler() {
+	go func() {
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+
+			case entry := <-s.insideSendQueue:
+				s.sendResponse(entry.addr, entry.msg)
+			}
+		}
+	}()
+}
+
+func (s *Server) sendResponse(addr net.Addr, resp *dns.Msg) {
+	// serialize the message
+	data, packErr := resp.Pack()
+	if packErr != nil {
+		log.Printf("Failed to pack DNS response: %s\n", packErr)
+		return
+	}
+
+	// select the correct UDP connection
+	var conn *net.UDPConn
+	if udpAddr, ok := addr.(*net.UDPAddr); ok {
+		if udpAddr.IP.To4() != nil {
+			conn = s.udpConnIPv4
+		} else {
+			conn = s.udpConnIPv6
+		}
+	} else {
+		log.Printf("Failed to cast address to UDP address: %s\n", addr)
+		return
+	}
+
+	// send the message
+	n, writeErr := conn.WriteToUDP(data, addr.(*net.UDPAddr))
+	if writeErr != nil {
+		log.Printf("Failed to send DNS response: %s\n", writeErr)
+		return
+	}
+	if n != len(data) {
+		log.Printf("Sent size %d didn't match message size %d\n", n, len(data))
+	}
 }

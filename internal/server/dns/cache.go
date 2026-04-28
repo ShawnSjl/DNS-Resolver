@@ -92,15 +92,9 @@ func (c *RecordCache) Add(rr dns.RR) {
 	c.records[key] = rr
 }
 
-func (c *RecordCache) Get(domain string, rType uint16, rClass uint16) (dns.RR, bool) {
+func (c *RecordCache) Get(key CacheKey) (dns.RR, bool) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-
-	key := CacheKey{
-		domain: domain,
-		qType:  rType,
-		qClass: rClass,
-	}
 
 	return c.records[key], c.records[key] != nil
 }

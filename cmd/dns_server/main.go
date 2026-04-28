@@ -40,7 +40,7 @@ func main() {
 	// create DNS server
 	dnsServer := dns.NewDNSServer(rootCtx)
 	dnsServer.RunIPv4(uint16(dnsPort)) // run DNS server in IPv4
-	//dnsServer.RunIPv6(uint16(dnsPort)) // run DNS server in IPv6
+	dnsServer.RunIPv6(uint16(dnsPort)) // run DNS server in IPv6
 
 	// TODO: handle message from controller interface
 	log.Printf("Controller port: %d", controllerPort)
