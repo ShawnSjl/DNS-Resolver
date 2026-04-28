@@ -34,14 +34,14 @@ type Server struct {
 	sendOutsideQueue     *SendOutside
 	receivedOutsideQueue *ReceiveOutside
 
+	// blocked domains
+	blocked *Blacklist
+
 	// cache
 	cache *RecordCache
 
-	// question table
-	questionTable *QuestionTable
-
-	// blocked domains
-	blocked *Blacklist
+	// request table
+	requestTable *RequestTable
 }
 
 type Entry struct {
@@ -60,7 +60,7 @@ func NewDNSServer(parent context.Context) *Server {
 		insideSendQueue:    make(chan Entry, QueueSize),
 		insideReceiveQueue: make(chan Entry, QueueSize),
 		cache:              NewRecordCache(ctx),
-		questionTable:      NewQuestionTable(ctx),
+		requestTable:       NewRequestTable(ctx),
 		blocked:            NewBlacklist(),
 	}
 
@@ -173,6 +173,7 @@ func (s *Server) InsideRequestHandler() {
 
 				// Get question from the message
 				question := reqEntry.msg.Question[0]
+				log.Printf("Question: %s\n", question.Name)
 
 				// Check if the domain is blocked
 				if s.blocked.Contains(question.Name) {
@@ -198,8 +199,13 @@ func (s *Server) InsideRequestHandler() {
 					continue
 				}
 
-				// TODO: add to the question table
-				log.Printf("Question: %s\n", question.Name)
+				// TODO: new feature: support custom record for local network
+
+				// Add request to the query table
+				if err := s.requestTable.Add(reqEntry); err != nil {
+					log.Println("Fail to add request to table: ", err)
+					continue
+				}
 			}
 		}
 	}()
