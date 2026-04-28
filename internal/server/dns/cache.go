@@ -45,14 +45,15 @@ func NewRecordCache(parent context.Context) *RecordCache {
 func (c *RecordCache) StartTTLTimer() {
 	go func() {
 		// Start a ticker to check TTL every second
-		timer := time.NewTicker(time.Second)
+		ticker := time.NewTicker(time.Second)
 
 		for {
 			select {
 			case <-c.ctx.Done():
+				ticker.Stop()
 				return
 
-			case <-timer.C:
+			case <-ticker.C:
 				c.mutex.Lock()
 				var deleteList []CacheKey
 
