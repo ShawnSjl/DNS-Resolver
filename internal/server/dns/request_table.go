@@ -30,17 +30,20 @@ func (rt *RequestTable) Add(entry Entry) error {
 	rt.mutex.Lock()
 	defer rt.mutex.Unlock()
 
-	query := &Request{
-		ctx:               rt.ctx,
-		currTransactionID: rt.getNewTransactionID(),
-		entry:             entry,
-		queries:           []*Query{},
+	// create a new request based on the entry
+	request, err := NewRequest(rt, entry)
+	if err != nil {
+		return err
 	}
-	// TODO: add direct graph
 
-	rt.list[query.currTransactionID] = query
+	// generate query request based on the direct graph
+	err = request.GenerateNewRequests()
+	if err != nil {
+		return err
+	}
 
-	// TODO: generate query request based on the direct graph
+	// add the request to the table
+	rt.list[request.currTransactionID] = request
 
 	return nil
 }
