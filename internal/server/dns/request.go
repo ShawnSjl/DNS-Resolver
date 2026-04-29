@@ -2,6 +2,9 @@ package dns
 
 import (
 	"context"
+	"fmt"
+	"log"
+	"net"
 	"time"
 
 	"github.com/brown-cs1680-s26/final-jiale-xinran/internal/server/dns/graph"
@@ -9,7 +12,7 @@ import (
 )
 
 const (
-	resendInterval = 1 * time.Second
+	timeoutInterval = 1 * time.Second
 )
 
 type Request struct {
@@ -25,9 +28,10 @@ type Request struct {
 type Query struct {
 	ctx context.Context
 
-	req   *dns.Msg    // query request
-	state QueryState  // state of the query request
-	timer *time.Timer // timer for resending the query
+	req    *dns.Msg // query request
+	isIPv6 bool
+	state  QueryState  // state of the query request
+	timer  *time.Timer // timer for resending the query
 }
 
 type QueryState uint8
@@ -36,6 +40,7 @@ const (
 	QueryStateSent QueryState = iota
 	QueryStateSuccess
 	QueryStateTimeout
+	QueryStateError
 )
 
 // ******************** Initialization Interface **********************
@@ -43,65 +48,158 @@ const (
 func NewRequest(table *RequestTable, entry Entry) (*Request, error) {
 	ctx := context.WithoutCancel(table.ctx)
 
-	query := &Request{
+	request := &Request{
 		ctx:      ctx,
+		table:    table,
 		entry:    entry,
 		queries:  []*Query{},
 		resolver: graph.NewResolver("."),
 	}
 
-	return query, nil
+	return request, nil
 }
 
-// ******************** Interface **********************
+// ******************** Send Interface **********************
 
-func (r *Request) GenerateNewRequests() error {
-	// Return if there are queries that have already been sent and are not yet timed out
+func (r *Request) GenerateAndSendNewQueries() error {
+	// Return if there are queries
 	if len(r.queries) != 0 {
-		for _, query := range r.queries {
-			if query.state == QueryStateSent {
-				return nil
-			}
-		}
+		return fmt.Errorf("queries not empty")
 	}
 
 	// If the resolver stack is empty, query the ROOT NS
 	if len(r.resolver.Stack) == 0 {
 		r.currTransactionID = r.table.getNewTransactionID()
 
-		// Create a new DNS request
-		dnsReqHdr := dns.MsgHdr{
-			Id:                r.currTransactionID,
-			Response:          false,
-			Opcode:            0,
-			Truncated:         false,
-			RecursionDesired:  false,
-			Zero:              false,
-			AuthenticatedData: true,
-			CheckingDisabled:  false,
-		}
+		// Create query message for root dns
+		dnsQueryReq := newDnsQueryMsg(r.currTransactionID, ".", dns.TypeNS)
 
-		dnsReq := &dns.Msg{
-			MsgHdr:   dnsReqHdr,
-			Compress: false,
-		}
-
-		// Set the question
-		dnsReq.SetQuestion("<ROOT>", dns.TypeNS)
-		dnsReq.RecursionDesired = false
+		// Send the query message
+		r.sendQuery(dnsQueryReq, false)
+		//r.sendQuery(dnsQueryReq, true)
 
 		return nil
 	}
 
+	log.Printf("Resolver stack is not empty, rest logic not implemented yet")
+
 	return nil
 }
 
-// ******************** Resend Timer **********************
+func (r *Request) sendQuery(req *dns.Msg, isIPv6 bool) {
+	// Create a new query record for the DNS message
+	query := &Query{
+		ctx:    r.ctx,
+		req:    req,
+		isIPv6: isIPv6,
+		state:  QueryStateSent,
+	}
+	r.queries = append(r.queries, query)
 
-func (r *Request) resendTimer() {
-	/* TODO: not implemented yet
-	1. create a new goroutine
-	2. wait for the timer to expire or the context to be canceled
-	3. forward the query request to the outside
-	*/
+	go func(r *Request, query *Query) {
+		// Determine the network type
+		var netType string
+		var bufSize int
+		if query.isIPv6 {
+			netType = "udp6"
+			bufSize = UDP6MTU
+		} else {
+			netType = "udp4"
+			bufSize = UDP4MTU
+		}
+
+		// Get the remote address
+		remoteAddr, _ := net.ResolveUDPAddr(netType, "127.0.0.11:40120")
+
+		// Create a UDP connection
+		conn, connErr := net.DialUDP(netType, nil, remoteAddr)
+		if connErr != nil {
+			log.Println("Fail to dial UDP: ", connErr)
+			query.state = QueryStateError
+			return
+		}
+		defer func(conn *net.UDPConn) {
+			err := conn.Close()
+			if err != nil {
+				log.Println("Fail to close UDP connection: ", err)
+			}
+		}(conn)
+
+		// Pack the DNS query
+		payload, packErr := query.req.Pack()
+		if packErr != nil {
+			log.Println("Fail to pack DNS query: ", packErr)
+			query.state = QueryStateError
+			return
+		}
+
+		// Send the DNS query
+		select {
+		case <-query.ctx.Done():
+			return
+		case <-r.table.sendSignal:
+			r.table.ResetTimer()
+		}
+		if _, sendErr := conn.Write(payload); sendErr != nil {
+			log.Println("Fail to send DNS query: ", sendErr)
+			query.state = QueryStateError
+			return
+		}
+
+		log.Println(query.req.String())
+
+		// Read the DNS response
+		buf := make([]byte, bufSize)
+		n, addr, readErr := conn.ReadFrom(buf)
+		if readErr != nil {
+			log.Println("Fail to read from UDP connection: ", readErr)
+			query.state = QueryStateError
+			return
+		}
+
+		// Unpack the DNS response
+		var resp dns.Msg
+		if unpackErr := resp.Unpack(buf[:n]); unpackErr != nil {
+			log.Println("Fail to unpack DNS response: ", unpackErr)
+			query.state = QueryStateError
+			return
+		}
+
+		log.Printf("Received DNS response from %s: \n", addr)
+		log.Printf("%s\n", resp.String())
+	}(r, query)
 }
+
+func newDnsQueryMsg(id uint16, name string, t uint16) *dns.Msg {
+	// Create a new DNS request
+	dnsReqHdr := dns.MsgHdr{
+		Id:                id,
+		Response:          false,
+		Opcode:            0,
+		Truncated:         false,
+		RecursionDesired:  false,
+		Zero:              false,
+		AuthenticatedData: true,
+		CheckingDisabled:  false,
+	}
+
+	dnsReq := &dns.Msg{
+		MsgHdr:   dnsReqHdr,
+		Compress: false,
+	}
+
+	// Set the question
+	dnsReq.SetQuestion(name, t)
+	dnsReq.RecursionDesired = false
+
+	opt := &dns.OPT{}
+	opt.Hdr.Name = "."
+	opt.Hdr.Rrtype = dns.TypeOPT
+	opt.SetUDPSize(4096)
+	opt.SetDo(true)
+	dnsReq.Extra = append(dnsReq.Extra, opt)
+
+	return dnsReq
+}
+
+// ******************** Receive Interface **********************

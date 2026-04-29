@@ -17,7 +17,7 @@ const (
 	UDP4MTU        = MTU - IPv4HeaderSize - UDPHeaderSize
 	UDP6MTU        = MTU - IPv6HeaderSize - UDPHeaderSize
 
-	QueueSize = 1024
+	queueSize = 1024
 )
 
 type Server struct {
@@ -29,10 +29,6 @@ type Server struct {
 	udpConnIPv6        *net.UDPConn
 	insideSendQueue    chan Entry
 	insideReceiveQueue chan Entry
-
-	// outside
-	sendOutsideQueue     *SendOutside
-	receivedOutsideQueue *ReceiveOutside
 
 	// blocked domains
 	blocked *Blacklist
@@ -57,8 +53,8 @@ func NewDNSServer(parent context.Context) *Server {
 	server := &Server{
 		ctx:                ctx,
 		cancel:             cancel,
-		insideSendQueue:    make(chan Entry, QueueSize),
-		insideReceiveQueue: make(chan Entry, QueueSize),
+		insideSendQueue:    make(chan Entry, queueSize),
+		insideReceiveQueue: make(chan Entry, queueSize),
 		cache:              NewRecordCache(ctx),
 		requestTable:       NewRequestTable(ctx),
 		blocked:            NewBlacklist(),

@@ -4,6 +4,11 @@ import (
 	"context"
 	"math/rand/v2"
 	"sync"
+	"time"
+)
+
+const (
+	queryInterval = 100 * time.Millisecond
 )
 
 type RequestTable struct {
@@ -11,17 +16,25 @@ type RequestTable struct {
 
 	list  map[uint16]*Request // use Transcation ID as the key
 	mutex sync.Mutex
+
+	timer      *time.Timer
+	sendSignal chan bool // signal to tell the request to send a query to the remote server
 }
 
 // ******************** Initialization Interface **********************
 
 func NewRequestTable(parent context.Context) *RequestTable {
 	ctx := context.WithoutCancel(parent)
-	return &RequestTable{
-		ctx:   ctx,
-		list:  make(map[uint16]*Request),
-		mutex: sync.Mutex{},
+
+	table := &RequestTable{
+		ctx:        ctx,
+		list:       make(map[uint16]*Request),
+		mutex:      sync.Mutex{},
+		sendSignal: make(chan bool, 1),
 	}
+	table.SendIntervalTimer()
+
+	return table
 }
 
 // ******************** Interface **********************
@@ -37,7 +50,7 @@ func (rt *RequestTable) Add(entry Entry) error {
 	}
 
 	// generate query request based on the direct graph
-	err = request.GenerateNewRequests()
+	err = request.GenerateAndSendNewQueries()
 	if err != nil {
 		return err
 	}
@@ -82,4 +95,37 @@ func (rt *RequestTable) getNewTransactionID() uint16 {
 			return id
 		}
 	}
+}
+
+// ******************** Outside DNS Request Handler **********************
+
+func (rt *RequestTable) SendIntervalTimer() {
+	go func() {
+		rt.timer = time.NewTimer(0 * time.Second)
+
+		for {
+			select {
+			case <-rt.ctx.Done():
+				if rt.timer != nil && !rt.timer.Stop() {
+					select {
+					case <-rt.timer.C:
+					default:
+					}
+				}
+				return
+
+			case <-rt.timer.C:
+				// Send a query to the remote server must wait for the timer.
+				// signal the request in a non-blocking way
+				select {
+				case rt.sendSignal <- true:
+				default:
+				}
+			}
+		}
+	}()
+}
+
+func (rt *RequestTable) ResetTimer() {
+	rt.timer.Reset(queryInterval)
 }
