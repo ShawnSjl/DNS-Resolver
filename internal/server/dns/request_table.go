@@ -15,7 +15,7 @@ type RequestTable struct {
 	ctx    context.Context
 	server *Server
 
-	list  map[uint16]*Request // use Transcation ID as the key
+	list  map[uint16]struct{} // use Transcation ID as the key
 	mutex sync.Mutex
 
 	timer       *time.Timer
@@ -30,7 +30,7 @@ func newRequestTable(server *Server) *RequestTable {
 	table := &RequestTable{
 		ctx:         ctx,
 		server:      server,
-		list:        make(map[uint16]*Request),
+		list:        make(map[uint16]struct{}),
 		mutex:       sync.Mutex{},
 		querySignal: make(chan bool, 1),
 	}
@@ -41,55 +41,22 @@ func newRequestTable(server *Server) *RequestTable {
 
 // ******************** Interface **********************
 
-func (rt *RequestTable) add(entry Entry) error {
-	rt.mutex.Lock()
-	defer rt.mutex.Unlock()
-
-	// create a new request based on the entry
-	request, err := newRequest(rt, entry)
-	if err != nil {
-		return err
-	}
-
-	// resolve the request by sending queries
-	return request.resolve()
-}
-
-func (rt *RequestTable) get(transactionID uint16) (*Request, error) {
-	rt.mutex.Lock()
-	defer rt.mutex.Unlock()
-
-	// find the query in the table
-	query, ok := rt.list[transactionID]
-	if !ok {
-		return nil, nil
-	}
-
-	// remove the question from the table and return it
-	delete(rt.list, transactionID)
-	return query, nil
-}
-
-func (rt *RequestTable) update(question *Request) error {
-	rt.mutex.Lock()
-	defer rt.mutex.Unlock()
-
-	rt.list[question.currTransactionID] = question
-	return nil
-}
-
 func (rt *RequestTable) getNewTransactionID() uint16 {
+	rt.mutex.Lock()
+	defer rt.mutex.Unlock()
+
 	for {
 		id := uint16(rand.Uint32())
 
 		// avoid collision
 		if _, ok := rt.list[id]; !ok {
+			rt.list[id] = struct{}{}
 			return id
 		}
 	}
 }
 
-// ******************** Outside DNS Request Handler **********************
+// ******************** Outside DNS Request Timer **********************
 
 func (rt *RequestTable) sendIntervalTimer() {
 	go func() {

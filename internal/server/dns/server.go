@@ -203,11 +203,9 @@ func (s *Server) insideRequestHandler() {
 
 				// TODO: new feature: support custom record for local network
 
-				// Add request to the query table
-				if err := s.requestTable.add(reqEntry); err != nil {
-					log.Println("Fail to add request to table: ", err)
-					continue
-				}
+				// Resolve the request
+				resolver := NewResolver(s.requestTable, reqEntry)
+				resolver.resolve()
 			}
 		}
 	}()
