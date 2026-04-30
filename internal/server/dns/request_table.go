@@ -18,8 +18,8 @@ type RequestTable struct {
 	list  map[uint16]*Request // use Transcation ID as the key
 	mutex sync.Mutex
 
-	timer      *time.Timer
-	sendSignal chan bool // signal to tell the request to send a query to the remote server
+	timer       *time.Timer
+	querySignal chan bool // signal to tell the request to send a query to the remote server
 }
 
 // ******************** Initialization Interface **********************
@@ -28,11 +28,11 @@ func newRequestTable(server *Server) *RequestTable {
 	ctx := context.WithoutCancel(server.ctx)
 
 	table := &RequestTable{
-		ctx:        ctx,
-		server:     server,
-		list:       make(map[uint16]*Request),
-		mutex:      sync.Mutex{},
-		sendSignal: make(chan bool, 1),
+		ctx:         ctx,
+		server:      server,
+		list:        make(map[uint16]*Request),
+		mutex:       sync.Mutex{},
+		querySignal: make(chan bool, 1),
 	}
 	table.sendIntervalTimer()
 
@@ -110,7 +110,7 @@ func (rt *RequestTable) sendIntervalTimer() {
 				// Send a query to the remote server must wait for the timer.
 				// signal the request in a non-blocking way
 				select {
-				case rt.sendSignal <- true:
+				case rt.querySignal <- true:
 				default:
 				}
 			}

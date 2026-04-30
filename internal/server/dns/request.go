@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -97,8 +98,16 @@ func (r *Request) sendQuery(req *dns.Msg, remoteIP string) {
 	}
 	r.queries = append(r.queries, query)
 
+	// Use a goroutine to send the DNS query
 	go func(r *Request, query *Query) {
-		log.Println("Sending DNS query to ", query.addr)
+		// Wait for the query signal
+		select {
+		case <-query.ctx.Done():
+			return
+		case <-r.table.querySignal:
+			r.table.resetTimer()
+		}
+
 		// Create a UDP connection
 		conn, connErr := net.DialUDP("udp", nil, query.addr)
 		if connErr != nil {
@@ -113,6 +122,13 @@ func (r *Request) sendQuery(req *dns.Msg, remoteIP string) {
 			}
 		}(conn)
 
+		setErr := conn.SetWriteDeadline(time.Now().Add(timeoutInterval))
+		if setErr != nil {
+			log.Println("Fail to set write deadline: ", setErr)
+			query.state = QueryStateError
+			return
+		}
+
 		// Pack the DNS query
 		payload, packErr := query.req.Pack()
 		if packErr != nil {
@@ -122,19 +138,11 @@ func (r *Request) sendQuery(req *dns.Msg, remoteIP string) {
 		}
 
 		// Send the DNS query
-		select {
-		case <-query.ctx.Done():
-			return
-		case <-r.table.sendSignal:
-			r.table.resetTimer()
-		}
 		if _, sendErr := conn.Write(payload); sendErr != nil {
 			log.Println("Fail to send DNS query: ", sendErr)
 			query.state = QueryStateError
 			return
 		}
-
-		log.Println(query.req.String())
 
 		// Read the DNS response
 		var size int
@@ -146,6 +154,12 @@ func (r *Request) sendQuery(req *dns.Msg, remoteIP string) {
 		buf := make([]byte, size)
 		n, addr, readErr := conn.ReadFrom(buf)
 		if readErr != nil {
+			// Check if the error is a timeout
+			var ne net.Error
+			if errors.As(readErr, &ne) && ne.Timeout() {
+				query.state = QueryStateTimeout
+				return
+			}
 			log.Println("Fail to read from UDP connection: ", readErr)
 			query.state = QueryStateError
 			return
