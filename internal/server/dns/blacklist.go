@@ -13,7 +13,7 @@ type Blacklist struct {
 
 // ******************** Initialization Interface **********************
 
-func NewBlacklist() *Blacklist {
+func newBlacklist() *Blacklist {
 	return &Blacklist{
 		domains: make(map[string]struct{}),
 		mutex:   sync.RWMutex{},
@@ -22,14 +22,14 @@ func NewBlacklist() *Blacklist {
 
 // ******************** Interface **********************
 
-func (b *Blacklist) Add(domain string) {
+func (b *Blacklist) add(domain string) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
 	b.domains[domain] = struct{}{}
 }
 
-func (b *Blacklist) Contains(domain string) bool {
+func (b *Blacklist) contains(domain string) bool {
 	b.mutex.RLock()
 	defer b.mutex.RUnlock()
 
@@ -37,14 +37,14 @@ func (b *Blacklist) Contains(domain string) bool {
 	return ok
 }
 
-func (b *Blacklist) Remove(domain string) {
+func (b *Blacklist) remove(domain string) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
 	delete(b.domains, domain)
 }
 
-func (b *Blacklist) List() string {
+func (b *Blacklist) list() string {
 	b.mutex.RLock()
 	defer b.mutex.RUnlock()
 

@@ -12,7 +12,8 @@ const (
 )
 
 type RequestTable struct {
-	ctx context.Context
+	ctx    context.Context
+	server *Server
 
 	list  map[uint16]*Request // use Transcation ID as the key
 	mutex sync.Mutex
@@ -23,45 +24,38 @@ type RequestTable struct {
 
 // ******************** Initialization Interface **********************
 
-func NewRequestTable(parent context.Context) *RequestTable {
-	ctx := context.WithoutCancel(parent)
+func newRequestTable(server *Server) *RequestTable {
+	ctx := context.WithoutCancel(server.ctx)
 
 	table := &RequestTable{
 		ctx:        ctx,
+		server:     server,
 		list:       make(map[uint16]*Request),
 		mutex:      sync.Mutex{},
 		sendSignal: make(chan bool, 1),
 	}
-	table.SendIntervalTimer()
+	table.sendIntervalTimer()
 
 	return table
 }
 
 // ******************** Interface **********************
 
-func (rt *RequestTable) Add(entry Entry) error {
+func (rt *RequestTable) add(entry Entry) error {
 	rt.mutex.Lock()
 	defer rt.mutex.Unlock()
 
 	// create a new request based on the entry
-	request, err := NewRequest(rt, entry)
+	request, err := newRequest(rt, entry)
 	if err != nil {
 		return err
 	}
 
-	// generate query request based on the direct graph
-	err = request.GenerateAndSendNewQueries()
-	if err != nil {
-		return err
-	}
-
-	// add the request to the table
-	rt.list[request.currTransactionID] = request
-
-	return nil
+	// resolve the request by sending queries
+	return request.resolve()
 }
 
-func (rt *RequestTable) Get(transactionID uint16) (*Request, error) {
+func (rt *RequestTable) get(transactionID uint16) (*Request, error) {
 	rt.mutex.Lock()
 	defer rt.mutex.Unlock()
 
@@ -76,15 +70,13 @@ func (rt *RequestTable) Get(transactionID uint16) (*Request, error) {
 	return query, nil
 }
 
-func (rt *RequestTable) Update(question *Request) error {
+func (rt *RequestTable) update(question *Request) error {
 	rt.mutex.Lock()
 	defer rt.mutex.Unlock()
 
 	rt.list[question.currTransactionID] = question
 	return nil
 }
-
-// ******************** Private Interface **********************
 
 func (rt *RequestTable) getNewTransactionID() uint16 {
 	for {
@@ -99,7 +91,7 @@ func (rt *RequestTable) getNewTransactionID() uint16 {
 
 // ******************** Outside DNS Request Handler **********************
 
-func (rt *RequestTable) SendIntervalTimer() {
+func (rt *RequestTable) sendIntervalTimer() {
 	go func() {
 		rt.timer = time.NewTimer(0 * time.Second)
 
@@ -126,6 +118,6 @@ func (rt *RequestTable) SendIntervalTimer() {
 	}()
 }
 
-func (rt *RequestTable) ResetTimer() {
+func (rt *RequestTable) resetTimer() {
 	rt.timer.Reset(queryInterval)
 }

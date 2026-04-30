@@ -28,7 +28,7 @@ type CacheKey struct {
 
 // ******************** Initialization Interface **********************
 
-func NewRecordCache(parent context.Context) *RecordCache {
+func newRecordCache(parent context.Context) *RecordCache {
 	// Create a child context without cancellation
 	ctx := context.WithoutCancel(parent)
 
@@ -39,14 +39,14 @@ func NewRecordCache(parent context.Context) *RecordCache {
 	}
 
 	// Start TTL timer
-	cache.StartTTLTimer()
+	cache.startTTLTimer()
 
 	return cache
 }
 
 // ******************** TTL Timer **********************
 
-func (c *RecordCache) StartTTLTimer() {
+func (c *RecordCache) startTTLTimer() {
 	go func() {
 		// Start a ticker to check TTL every second
 		ticker := time.NewTicker(time.Second)
@@ -83,7 +83,7 @@ func (c *RecordCache) StartTTLTimer() {
 
 // ******************** Interface **********************
 
-func (c *RecordCache) Add(rr dns.RR) {
+func (c *RecordCache) add(rr dns.RR) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -97,14 +97,14 @@ func (c *RecordCache) Add(rr dns.RR) {
 	c.records[key] = rr
 }
 
-func (c *RecordCache) Get(key CacheKey) (dns.RR, bool) {
+func (c *RecordCache) get(key CacheKey) (dns.RR, bool) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
 	return c.records[key], c.records[key] != nil
 }
 
-func (c *RecordCache) List() string {
+func (c *RecordCache) list() string {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 

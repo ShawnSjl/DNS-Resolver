@@ -7,7 +7,6 @@ import (
 	"net"
 	"time"
 
-	"github.com/brown-cs1680-s26/final-jiale-xinran/internal/server/dns/graph"
 	"github.com/miekg/dns"
 )
 
@@ -19,19 +18,19 @@ type Request struct {
 	ctx   context.Context
 	table *RequestTable
 
-	entry             Entry           // entry to store the original query request and address
-	currTransactionID uint16          // current transaction ID
-	queries           []*Query        // queries to the outside
-	resolver          *graph.Resolver // resolver for the query
+	entry             Entry     // entry to store the original query request and address
+	currTransactionID uint16    // current transaction ID
+	queries           []*Query  // queries to the outside
+	resolver          *Resolver // resolver for the query
 }
 
 type Query struct {
 	ctx context.Context
 
-	req    *dns.Msg // query request
-	isIPv6 bool
-	state  QueryState  // state of the query request
-	timer  *time.Timer // timer for resending the query
+	req   *dns.Msg     // query request
+	addr  *net.UDPAddr // address of the remote server
+	state QueryState   // state of the query request
+	timer *time.Timer  // timer for resending the query
 }
 
 type QueryState uint8
@@ -45,7 +44,7 @@ const (
 
 // ******************** Initialization Interface **********************
 
-func NewRequest(table *RequestTable, entry Entry) (*Request, error) {
+func newRequest(table *RequestTable, entry Entry) (*Request, error) {
 	ctx := context.WithoutCancel(table.ctx)
 
 	request := &Request{
@@ -53,7 +52,7 @@ func NewRequest(table *RequestTable, entry Entry) (*Request, error) {
 		table:    table,
 		entry:    entry,
 		queries:  []*Query{},
-		resolver: graph.NewResolver("."),
+		resolver: NewResolver(table.server.cache, entry.msg.Question[0].Name, entry.msg.Question[0].Qtype),
 	}
 
 	return request, nil
@@ -61,58 +60,47 @@ func NewRequest(table *RequestTable, entry Entry) (*Request, error) {
 
 // ******************** Send Interface **********************
 
-func (r *Request) GenerateAndSendNewQueries() error {
+func (r *Request) resolve() error {
 	// Return if there are queries
 	if len(r.queries) != 0 {
 		return fmt.Errorf("queries not empty")
 	}
 
-	// If the resolver stack is empty, query the ROOT NS
-	if len(r.resolver.Stack) == 0 {
-		r.currTransactionID = r.table.getNewTransactionID()
+	// Register the request in the request table
+	r.currTransactionID = r.table.getNewTransactionID()
+	r.table.list[r.currTransactionID] = r
 
-		// Create query message for root dns
-		dnsQueryReq := newDnsQueryMsg(r.currTransactionID, ".", dns.TypeNS)
-
-		// Send the query message
-		r.sendQuery(dnsQueryReq, false)
-		//r.sendQuery(dnsQueryReq, true)
-
-		return nil
+	// Generate queries and send them to the outside
+	messages, remoteIPs := r.resolver.getNextQueries(r.currTransactionID)
+	for i, msg := range messages {
+		r.sendQuery(msg, remoteIPs[i])
 	}
-
-	log.Printf("Resolver stack is not empty, rest logic not implemented yet")
 
 	return nil
 }
 
-func (r *Request) sendQuery(req *dns.Msg, isIPv6 bool) {
+func (r *Request) sendQuery(req *dns.Msg, remoteIP string) {
+	// Get the remote address
+	addrStr := net.JoinHostPort(remoteIP, "53")
+	remoteAddr, resolveErr := net.ResolveUDPAddr("udp", addrStr)
+	if resolveErr != nil {
+		log.Printf("Fail to resolve UDP address %s: %e\n", addrStr, resolveErr)
+		return
+	}
+
 	// Create a new query record for the DNS message
 	query := &Query{
-		ctx:    r.ctx,
-		req:    req,
-		isIPv6: isIPv6,
-		state:  QueryStateSent,
+		ctx:   r.ctx,
+		req:   req,
+		addr:  remoteAddr,
+		state: QueryStateSent,
 	}
 	r.queries = append(r.queries, query)
 
 	go func(r *Request, query *Query) {
-		// Determine the network type
-		var netType string
-		var bufSize int
-		if query.isIPv6 {
-			netType = "udp6"
-			bufSize = UDP6MTU
-		} else {
-			netType = "udp4"
-			bufSize = UDP4MTU
-		}
-
-		// Get the remote address
-		remoteAddr, _ := net.ResolveUDPAddr(netType, "127.0.0.11:40120")
-
+		log.Println("Sending DNS query to ", query.addr)
 		// Create a UDP connection
-		conn, connErr := net.DialUDP(netType, nil, remoteAddr)
+		conn, connErr := net.DialUDP("udp", nil, query.addr)
 		if connErr != nil {
 			log.Println("Fail to dial UDP: ", connErr)
 			query.state = QueryStateError
@@ -138,7 +126,7 @@ func (r *Request) sendQuery(req *dns.Msg, isIPv6 bool) {
 		case <-query.ctx.Done():
 			return
 		case <-r.table.sendSignal:
-			r.table.ResetTimer()
+			r.table.resetTimer()
 		}
 		if _, sendErr := conn.Write(payload); sendErr != nil {
 			log.Println("Fail to send DNS query: ", sendErr)
@@ -149,7 +137,13 @@ func (r *Request) sendQuery(req *dns.Msg, isIPv6 bool) {
 		log.Println(query.req.String())
 
 		// Read the DNS response
-		buf := make([]byte, bufSize)
+		var size int
+		if query.addr.IP.To4() != nil {
+			size = UDP4MTU
+		} else {
+			size = UDP6MTU
+		}
+		buf := make([]byte, size)
 		n, addr, readErr := conn.ReadFrom(buf)
 		if readErr != nil {
 			log.Println("Fail to read from UDP connection: ", readErr)
@@ -165,41 +159,8 @@ func (r *Request) sendQuery(req *dns.Msg, isIPv6 bool) {
 			return
 		}
 
+		// TODO: handle the response
 		log.Printf("Received DNS response from %s: \n", addr)
 		log.Printf("%s\n", resp.String())
 	}(r, query)
 }
-
-func newDnsQueryMsg(id uint16, name string, t uint16) *dns.Msg {
-	// Create a new DNS request
-	dnsReqHdr := dns.MsgHdr{
-		Id:                id,
-		Response:          false,
-		Opcode:            0,
-		Truncated:         false,
-		RecursionDesired:  false,
-		Zero:              false,
-		AuthenticatedData: true,
-		CheckingDisabled:  false,
-	}
-
-	dnsReq := &dns.Msg{
-		MsgHdr:   dnsReqHdr,
-		Compress: false,
-	}
-
-	// Set the question
-	dnsReq.SetQuestion(name, t)
-	dnsReq.RecursionDesired = false
-
-	opt := &dns.OPT{}
-	opt.Hdr.Name = "."
-	opt.Hdr.Rrtype = dns.TypeOPT
-	opt.SetUDPSize(4096)
-	opt.SetDo(true)
-	dnsReq.Extra = append(dnsReq.Extra, opt)
-
-	return dnsReq
-}
-
-// ******************** Receive Interface **********************

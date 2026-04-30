@@ -55,13 +55,19 @@ func NewDNSServer(parent context.Context) *Server {
 		cancel:             cancel,
 		insideSendQueue:    make(chan Entry, queueSize),
 		insideReceiveQueue: make(chan Entry, queueSize),
-		cache:              NewRecordCache(ctx),
-		requestTable:       NewRequestTable(ctx),
-		blocked:            NewBlacklist(),
+		cache:              newRecordCache(ctx),
+		blocked:            newBlacklist(),
 	}
 
-	server.InsideRequestHandler()
-	server.InsideResponseHandler()
+	// load root hints
+	server.loadRootHints()
+
+	// create request table
+	server.requestTable = newRequestTable(server)
+
+	// handle DNS requests and responses
+	server.insideRequestHandler()
+	server.insideResponseHandler()
 
 	return server
 }
@@ -152,7 +158,7 @@ func (s *Server) Terminate() {
 
 // ******************** Inside DNS Request Handler **********************
 
-func (s *Server) InsideRequestHandler() {
+func (s *Server) insideRequestHandler() {
 	// goroutine to handle the outgoing DNS requests
 	go func() {
 		for {
@@ -172,7 +178,7 @@ func (s *Server) InsideRequestHandler() {
 				log.Printf("Question: %s\n", question.Name)
 
 				// Check if the domain is blocked
-				if s.blocked.Contains(question.Name) {
+				if s.blocked.contains(question.Name) {
 					s.handleBlocked(reqEntry.addr, reqEntry.msg)
 					continue
 				}
@@ -183,7 +189,7 @@ func (s *Server) InsideRequestHandler() {
 					qType:  question.Qtype,
 					qClass: question.Qclass,
 				}
-				if rr, ok := s.cache.Get(cacheKey); ok {
+				if rr, ok := s.cache.get(cacheKey); ok {
 					resp := dns.Msg{}
 					resp.SetReply(reqEntry.msg)
 					resp.Answer = append(resp.Answer, rr)
@@ -198,7 +204,7 @@ func (s *Server) InsideRequestHandler() {
 				// TODO: new feature: support custom record for local network
 
 				// Add request to the query table
-				if err := s.requestTable.Add(reqEntry); err != nil {
+				if err := s.requestTable.add(reqEntry); err != nil {
 					log.Println("Fail to add request to table: ", err)
 					continue
 				}
@@ -234,7 +240,7 @@ func (s *Server) handleBlocked(addr net.Addr, req *dns.Msg) {
 
 // ******************** Inside DNS Response Handler **********************
 
-func (s *Server) InsideResponseHandler() {
+func (s *Server) insideResponseHandler() {
 	go func() {
 		for {
 			select {
