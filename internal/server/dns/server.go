@@ -204,7 +204,7 @@ func (s *Server) insideRequestHandler() {
 				// TODO: new feature: support custom record for local network
 
 				// Resolve the request
-				resolver := NewResolver(s.requestTable, reqEntry)
+				resolver := NewResolver(s, reqEntry)
 				resolver.resolve()
 			}
 		}

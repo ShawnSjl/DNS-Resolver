@@ -12,8 +12,7 @@ const (
 )
 
 type RequestTable struct {
-	ctx    context.Context
-	server *Server
+	ctx context.Context
 
 	list  map[uint16]struct{} // use Transcation ID as the key
 	mutex sync.Mutex
@@ -29,7 +28,6 @@ func newRequestTable(server *Server) *RequestTable {
 
 	table := &RequestTable{
 		ctx:         ctx,
-		server:      server,
 		list:        make(map[uint16]struct{}),
 		mutex:       sync.Mutex{},
 		querySignal: make(chan bool, 1),
@@ -54,6 +52,13 @@ func (rt *RequestTable) getNewTransactionID() uint16 {
 			return id
 		}
 	}
+}
+
+func (rt *RequestTable) recycleTransactionID(id uint16) {
+	rt.mutex.Lock()
+	defer rt.mutex.Unlock()
+
+	delete(rt.list, id)
 }
 
 // ******************** Outside DNS Request Timer **********************
