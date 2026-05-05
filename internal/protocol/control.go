@@ -16,6 +16,7 @@ type Command struct {
 }
 
 func ParseCommand(line string) (Command, error) {
+	// Plain whitespace commands are enough for this controller.
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
 		return Command{}, errors.New("empty command")
@@ -23,6 +24,7 @@ func ParseCommand(line string) (Command, error) {
 
 	switch strings.ToLower(fields[0]) {
 	case "b", "block":
+		// Short aliases make dnsctl less annoying to type in.
 		if len(fields) != 2 {
 			return Command{}, errors.New("usage: block DOMAIN")
 		}
@@ -46,12 +48,14 @@ func ParseCommand(line string) (Command, error) {
 		if len(fields) != 3 {
 			return Command{}, errors.New("usage: q DOMAIN TYPE")
 		}
+		// Use dns's own type table.
 		qtype, ok := dns.StringToType[strings.ToUpper(fields[2])]
 		if !ok {
 			return Command{}, fmt.Errorf("unknown DNS type %q", fields[2])
 		}
 		return Command{Name: "q", Domain: fields[1], QType: qtype}, nil
 	case "mode":
+		// mode alone reads; mode VALUE updates.
 		if len(fields) == 1 {
 			return Command{Name: "mode"}, nil
 		}
@@ -84,6 +88,7 @@ func ParseCommand(line string) (Command, error) {
 }
 
 func Help() string {
+	// Keep this near the parser order.
 	return strings.Join([]string{
 		"b DOMAIN",
 		"block DOMAIN",

@@ -11,6 +11,7 @@ import (
 	"github.com/brown-cs1680-s26/final-jiale-xinran/internal/protocol"
 )
 
+// Runtime is the controller's small hook into the DNS server.
 type Runtime interface {
 	Block(domain string)
 	Unblock(domain string)
@@ -26,6 +27,7 @@ type Runtime interface {
 func Serve(ctx context.Context, ln net.Listener, runtime Runtime, clientTimeout time.Duration) error {
 	errCh := make(chan error, 1)
 	go func() {
+		// Closing the listener unblocks Accept on shutdown.
 		<-ctx.Done()
 		_ = ln.Close()
 	}()
@@ -42,6 +44,7 @@ func Serve(ctx context.Context, ln net.Listener, runtime Runtime, clientTimeout 
 				}
 				return
 			}
+			// Commands are independent, so handlers can run in parallel.
 			go handleConn(ctx, conn, runtime, clientTimeout)
 		}
 	}()
@@ -54,6 +57,7 @@ func handleConn(ctx context.Context, conn net.Conn, runtime Runtime, clientTimeo
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
 
+	// One command per connection keeps nc testing simple.
 	if clientTimeout > 0 {
 		_ = conn.SetDeadline(time.Now().Add(clientTimeout))
 	}
@@ -62,6 +66,8 @@ func handleConn(ctx context.Context, conn net.Conn, runtime Runtime, clientTimeo
 		return
 	}
 	line = strings.TrimSpace(line)
+
+	// END tells clients when to stop reading.
 	response := execute(ctx, runtime, line)
 	if _, err := writer.WriteString(response); err != nil {
 		return
@@ -85,6 +91,7 @@ func execute(ctx context.Context, runtime Runtime, line string) string {
 		return "ERR " + err.Error() + "\n"
 	}
 
+	// Validate first, then call into the server.
 	switch cmd.Name {
 	case "block":
 		runtime.Block(cmd.Domain)
@@ -97,6 +104,7 @@ func execute(ctx context.Context, runtime Runtime, line string) string {
 	case "lr":
 		return listOrEmpty(runtime.ListRecords(), "cache is empty")
 	case "q":
+		// q uses the server's normal resolver/cache path.
 		out, err := runtime.Query(ctx, cmd.Domain, cmd.QType)
 		if err != nil {
 			return "ERR " + err.Error() + "\n"

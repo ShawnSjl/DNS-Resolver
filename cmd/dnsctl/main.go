@@ -16,6 +16,7 @@ func main() {
 	defaultAddr := flag.String("addr", "127.0.0.1:7878", "control server address")
 	flag.Parse()
 
+	// readline just makes the local prompt nicer.
 	rl, err := readline.New("dnsctl> ")
 	if err != nil {
 		fmt.Println(err)
@@ -27,6 +28,7 @@ func main() {
 	_ = client.Connect(*defaultAddr)
 
 	for {
+		// Ignore blank lines like a normal shell.
 		line, err := rl.Readline()
 		if err == readline.ErrInterrupt {
 			continue
@@ -44,6 +46,7 @@ func main() {
 		case "exit", "quit":
 			return
 		case "c":
+			// Use the default address if none is given.
 			addr := *defaultAddr
 			if len(fields) > 1 {
 				addr = fields[1]
@@ -80,6 +83,7 @@ type controllerClient struct {
 }
 
 func (c *controllerClient) Connect(addr string) error {
+	// Check the address before saving it.
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return err
@@ -91,6 +95,7 @@ func (c *controllerClient) Connect(addr string) error {
 }
 
 func (c *controllerClient) Close() {
+	// No open socket here, just mark it disconnected.
 	c.connected = false
 }
 
@@ -102,6 +107,7 @@ func (c *controllerClient) Send(line string) (string, error) {
 	if !c.connected || c.addr == "" {
 		return "", fmt.Errorf("not connected")
 	}
+	// Match the server's one-command-per-connection style.
 	conn, err := net.Dial("tcp", c.addr)
 	if err != nil {
 		c.connected = false
@@ -116,6 +122,7 @@ func (c *controllerClient) Send(line string) (string, error) {
 
 	var lines []string
 	for {
+		// END means the response is complete.
 		resp, err := reader.ReadString('\n')
 		if err != nil {
 			return "", err
