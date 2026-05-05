@@ -200,7 +200,7 @@ func (r *Resolver) resolve() {
 				log.Printf("[debug] current zone: %s, NS record: %s\n", currentZone.name, ns.String())
 
 				// Get glue records of the NS record
-				glues, glueErr := currentZone.getGlue(ns.Ns)
+				glues, glueErr := currentZone.getGlue(ns.Ns, r.server.supportIPv6)
 				if glueErr != nil {
 					log.Println("Fail to get glue records of NS record: ", glueErr)
 					r.terminate()
@@ -571,7 +571,7 @@ func (z *Zone) getRandomNS() (*dns.NS, error) {
 	return nil, nil
 }
 
-func (z *Zone) getGlue(domain string) ([]dns.RR, error) {
+func (z *Zone) getGlue(domain string, supportIPv6 bool) ([]dns.RR, error) {
 	z.mutex.Lock()
 	defer z.mutex.Unlock()
 
@@ -583,9 +583,11 @@ func (z *Zone) getGlue(domain string) ([]dns.RR, error) {
 		}
 	}
 
-	for _, glue := range z.glueAAAA {
-		if dns.Fqdn(glue.Header().Name) == dns.Fqdn(domain) {
-			result = append(result, glue)
+	if supportIPv6 {
+		for _, glue := range z.glueAAAA {
+			if dns.Fqdn(glue.Header().Name) == dns.Fqdn(domain) {
+				result = append(result, glue)
+			}
 		}
 	}
 
