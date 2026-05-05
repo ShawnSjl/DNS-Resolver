@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/rand/v2"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,9 +37,13 @@ var rootDNS = []string{
 
 type Resolver struct {
 	ctx    context.Context
-	server *Server
-	table  *RequestTable
-	cache  *RecordCache // cache for DNS records
+	cancel context.CancelFunc
+
+	server      *Server
+	table       *RequestTable
+	globalCache *RecordCache // cache for DNS records
+
+	localCache *RecordCache // cache for local records
 
 	// variables for the original query
 	entry    Entry // entry to store the original query request and address
@@ -85,14 +90,18 @@ const (
 // ******************** Initialization Interface **********************
 
 func NewResolver(server *Server, entry Entry) *Resolver {
-	ctx := context.WithoutCancel(server.ctx)
+	ctx, cancel := context.WithCancel(server.ctx)
 
 	// Add the root zone to the stack
 	resolver := &Resolver{
 		ctx:    ctx,
-		server: server,
-		table:  server.requestTable,
-		cache:  server.cache,
+		cancel: cancel,
+
+		server:      server,
+		table:       server.requestTable,
+		globalCache: server.cache,
+
+		localCache: newRecordCache(ctx),
 
 		entry:    entry,
 		goal:     entry.msg.Question[0].Name,
@@ -123,11 +132,7 @@ func (r *Resolver) createRootZone() *Zone {
 
 	for _, dnsServer := range rootDNS {
 		// Get A record of root-servers.net from cache
-		if v4RootRR, ok := r.cache.get(CacheKey{
-			domain: dnsServer,
-			qType:  dns.TypeA,
-			qClass: dns.ClassINET,
-		}); ok {
+		if v4RootRR, ok := r.globalCache.get(dnsServer, dns.TypeA, dns.ClassINET); ok {
 			// Create node of RR with type A root-servers.net
 			v4Node := &Node{
 				rr:           v4RootRR,
@@ -140,11 +145,7 @@ func (r *Resolver) createRootZone() *Zone {
 		}
 
 		// Get AAAA record of root-servers.net from cache
-		if v6RootRR, ok := r.cache.get(CacheKey{
-			domain: dnsServer,
-			qType:  dns.TypeAAAA,
-			qClass: dns.ClassINET,
-		}); ok {
+		if v6RootRR, ok := r.globalCache.get(dnsServer, dns.TypeAAAA, dns.ClassINET); ok {
 			// Create node of RR with type AAAA root-servers.net
 			v6Node := &Node{
 				rr:           v6RootRR,
@@ -243,9 +244,9 @@ func (r *Resolver) resolve() {
 					}
 					r.server.insideSendQueue <- entry
 
-					// recycle the transaction ID
-					r.table.recycleTransactionID(r.currTransactionID)
-					return
+					// exit the resolver
+					r.terminate()
+					continue ResolveLoop
 				}
 
 				// If all nodes have been queried, return to the previous zone
@@ -380,95 +381,56 @@ func (r *Resolver) sendQuery(node *Node, req *dns.Msg, remoteIP string) {
 		return
 	}
 
+	// Check if the response has no answer
+	if len(resp.Answer) == 0 && len(resp.Ns) == 0 {
+		node.state = StateZeroAnswer
+		return
+	}
+
+	// TODO: support Cache later
+
 	// Handle the Answers in the response
-	isAuthoritative := resp.Authoritative
 	for _, rr := range resp.Answer {
-		switch rr.Header().Rrtype {
-		case dns.TypeA:
-			zone := r.getZone(rr.Header().Name)
-			zone.addRecord(rr)
-
-			// Add to cache if RR is authoritative
-			if isAuthoritative {
-				r.cache.add(rr)
+		// If this is the final answer
+		if rr.Header().Rrtype == r.goalType && rr.Header().Name == r.goal {
+			// return the answer to the client
+			answerResp := dns.Msg{}
+			answerResp.SetReply(r.entry.msg)
+			answerResp.Authoritative = true
+			entry := Entry{
+				msg:  &answerResp,
+				addr: r.entry.addr,
 			}
+			r.server.insideSendQueue <- entry
 
-		case dns.TypeAAAA:
-			zone := r.getZone(rr.Header().Name)
-			zone.addRecord(rr)
+			// Add answer to global cache
+			r.globalCache.add(rr)
 
-			// Add to cache if RR is authoritative
-			if isAuthoritative {
-				r.cache.add(rr)
-			}
-
-		case dns.TypeNS:
-			zone := r.getZone(rr.Header().Name)
-			zone.addRecord(rr)
-
-			// Add to cache if RR is authoritative
-			if isAuthoritative {
-				r.cache.add(rr)
-			}
-
-		default:
-			// Ignore other type of RR for now
-			log.Println("Unsupported record type during query: ", rr.Header().Rrtype)
+			log.Println("Get answer during query: ", rr.String())
+			r.terminate()
+			return
 		}
+
+		zone := r.getZone(rr.Header().Name)
+		zone.addRecord(rr)
 	}
 
 	// Handle Authoritative RRs
 	for _, rr := range resp.Ns {
-		switch rr.Header().Rrtype {
-		case dns.TypeA:
-			zone := r.getZone(rr.Header().Name)
-			zone.addRecord(rr)
-
-			// Add to cache if RR is authoritative
-			if isAuthoritative {
-				r.cache.add(rr)
-			}
-
-		case dns.TypeAAAA:
-			zone := r.getZone(rr.Header().Name)
-			zone.addRecord(rr)
-
-			// Add to cache if RR is authoritative
-			if isAuthoritative {
-				r.cache.add(rr)
-			}
-
-		case dns.TypeNS:
-			zone := r.getZone(rr.Header().Name)
-			zone.addRecord(rr)
-
-			// Add to cache if RR is authoritative
-			if isAuthoritative {
-				r.cache.add(rr)
-			}
-
-		default:
-			// Ignore other type of RR for now
-			log.Println("Unsupported record type during query: ", rr.Header().Rrtype)
-		}
+		zone := r.getZone(rr.Header().Name)
+		zone.addRecord(rr)
 	}
 
 	// Handle Additional RRs
 	for _, rr := range resp.Extra {
-		switch rr.Header().Rrtype {
-		case dns.TypeA, dns.TypeAAAA:
-			log.Println("Get glue record during query: ", rr.String())
-
-		default:
-			// Ignore other type of RR for now
-			log.Println("Unsupported record type during query: ", rr.Header().Rrtype)
-		}
+		zone := r.getZone(rr.Header().Name) // FIXME: cannot get zone by rr.Header().Name in here
+		zone.handleGlue(rr)
 	}
 
 	log.Printf("One query finished, current zone: %s, queries count: %d\n", r.stack[r.currentZoneIdx].name, r.queriesCount.Load())
 	r.dump()
 	log.Println("Cache")
-	fmt.Println(r.cache.list())
+	fmt.Println(r.globalCache.toString())
 	log.Println("----------------------------------------")
 
 	// Check if resolver needs to go into next zone
@@ -502,10 +464,10 @@ func (z *Zone) addRecord(rr dns.RR) {
 	z.mutex.Lock()
 	defer z.mutex.Unlock()
 
+	// TODO: handle the timeout case
+
 	// Iterate through current node to check duplicate
 	for _, node := range z.nodes {
-		// TODO: handle the timeout case
-
 		// Check if there is a same RR in the node
 		if dns.IsDuplicate(node.rr, rr) {
 			node.rr = rr
@@ -525,10 +487,31 @@ func (z *Zone) addRecord(rr dns.RR) {
 }
 
 func (z *Zone) handleGlue(rr dns.RR) {
-	// TODO: Check if record is in bailiwick
-	if rr.Header().Name == "glue" {
-		// Glue this RR into Node
+	z.mutex.Lock()
+	defer z.mutex.Unlock()
+
+	// If record is in bailiwick
+	if strings.HasSuffix(rr.Header().Name, z.name) {
+		// TODO: cache the glue record
+
+		switch rr.Header().Rrtype {
+		case dns.TypeA, dns.TypeAAAA:
+			for _, node := range z.nodes {
+				switch node.rr.Header().Rrtype {
+				case dns.TypeNS:
+					if rr.Header().Name == node.rr.(*dns.NS).Ns {
+						node.state = StateHasAddress
+					}
+				}
+			}
+		default:
+			log.Println("Unsupported record type during glue: ", rr.Header().Rrtype)
+		}
 	}
+
+	log.Println("Record: ", rr.String(), " is not in bailiwick, ignore it")
+
+	// Right now only glue the records in bailiwick
 }
 
 func (r *Resolver) signalReady() {
@@ -536,6 +519,11 @@ func (r *Resolver) signalReady() {
 	case r.readySignal <- true:
 	default:
 	}
+}
+
+func (r *Resolver) terminate() {
+	r.table.recycleTransactionID(r.currTransactionID)
+	r.cancel()
 }
 
 // ******************** Helper Method **********************
