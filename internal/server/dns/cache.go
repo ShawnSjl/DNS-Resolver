@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -16,14 +17,18 @@ const (
 type RecordCache struct {
 	ctx context.Context
 
-	records map[CacheKey]dns.RR
+	records map[RRSetKey]RRSet
 	mutex   sync.RWMutex
 }
 
-type CacheKey struct {
+type RRSetKey struct {
 	domain string
 	qType  uint16
 	qClass uint16
+}
+
+type RRSet struct {
+	rrs map[string]dns.RR
 }
 
 // ******************** Initialization Interface **********************
@@ -34,7 +39,7 @@ func newRecordCache(parent context.Context) *RecordCache {
 
 	cache := &RecordCache{
 		ctx:     ctx,
-		records: make(map[CacheKey]dns.RR),
+		records: make(map[RRSetKey]RRSet),
 		mutex:   sync.RWMutex{},
 	}
 
@@ -59,22 +64,28 @@ func (c *RecordCache) startTTLTimer() {
 
 			case <-ticker.C:
 				c.mutex.Lock()
-				var deleteList []CacheKey
 
-				// Decrement TTL every second for all records
-				for key, record := range c.records {
-					record.Header().Ttl--
+				for setKey, rrSet := range c.records {
+					// Decrement TTL every second for all records and collect expired records
+					var deleteList []string
+					for key, rr := range rrSet.rrs {
+						rr.Header().Ttl--
 
-					// Check if TTL is 0
-					if record.Header().Ttl <= 0 {
-						deleteList = append(deleteList, key)
+						if rr.Header().Ttl <= 0 {
+							deleteList = append(deleteList, key)
+						}
+					}
+					// Remove expired records
+					for _, key := range deleteList {
+						delete(rrSet.rrs, key)
+					}
+
+					// If all records are expired, remove the RRSet
+					if len(rrSet.rrs) == 0 {
+						delete(c.records, setKey)
 					}
 				}
 
-				// Remove expired records
-				for _, key := range deleteList {
-					delete(c.records, key)
-				}
 				c.mutex.Unlock()
 			}
 		}
@@ -87,31 +98,73 @@ func (c *RecordCache) add(rr dns.RR) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	key := CacheKey{
+	key := RRSetKey{
 		domain: rr.Header().Name,
 		qType:  rr.Header().Rrtype,
 		qClass: rr.Header().Class,
 	}
 
 	rr.Header().Ttl = min(rr.Header().Ttl, MaxTTL) // limit TTL to 7 days
-	c.records[key] = rr
+
+	rrSet := c.records[key]
+	rrSet.add(rr)
 }
 
-func (c *RecordCache) get(key CacheKey) (dns.RR, bool) {
+func (s *RRSet) add(rr dns.RR) {
+	s.rrs[rrDataKey(rr)] = rr
+}
+
+func rrDataKey(rr dns.RR) string {
+	switch r := rr.(type) {
+	case *dns.A:
+		return r.A.String()
+	case *dns.AAAA:
+		return r.AAAA.String()
+	case *dns.NS:
+		return dns.Fqdn(strings.ToLower(r.Ns))
+	case *dns.CNAME:
+		return dns.Fqdn(strings.ToLower(r.Target))
+	case *dns.MX:
+		return fmt.Sprintf("%s %d", dns.Fqdn(strings.ToLower(r.Mx)), r.Preference)
+	default:
+		return rr.String()
+	}
+}
+
+func (c *RecordCache) get(domain string, qType uint16, qClass uint16) ([]dns.RR, bool) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
-	return c.records[key], c.records[key] != nil
+	key := RRSetKey{
+		domain: domain,
+		qType:  qType,
+		qClass: qClass,
+	}
+
+	// Check if the RRSet exists
+	if rrSet, ok := c.records[key]; ok {
+		// Return a copy of the RRSet
+		rrs := make([]dns.RR, 0, len(rrSet.rrs))
+		for _, rr := range rrSet.rrs {
+			r := dns.Copy(rr)
+			rrs = append(rrs, r)
+		}
+		return rrs, true
+	}
+
+	return nil, false
 }
 
-func (c *RecordCache) list() string {
+func (c *RecordCache) toString() string {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
 	var list []string
 
-	for _, record := range c.records {
-		list = append(list, record.String())
+	for _, rrSet := range c.records {
+		for _, rr := range rrSet.rrs {
+			list = append(list, rr.String())
+		}
 	}
 
 	return strings.Join(list, "\n")

@@ -184,15 +184,12 @@ func (s *Server) insideRequestHandler() {
 				}
 
 				// Check if the cache has the record of the domain
-				cacheKey := CacheKey{
-					domain: question.Name,
-					qType:  question.Qtype,
-					qClass: question.Qclass,
-				}
-				if rr, ok := s.cache.get(cacheKey); ok {
+				if rrSet, ok := s.cache.get(question.Name, question.Qtype, question.Qclass); ok {
 					resp := dns.Msg{}
 					resp.SetReply(reqEntry.msg)
-					resp.Answer = append(resp.Answer, rr)
+					for _, rr := range rrSet {
+						resp.Answer = append(resp.Answer, rr)
+					}
 					entry := Entry{
 						msg:  &resp,
 						addr: reqEntry.addr,
