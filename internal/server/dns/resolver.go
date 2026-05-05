@@ -246,12 +246,12 @@ func (r *Resolver) resolve() {
 
 func (r *Resolver) sendQuery(remoteIP string) error {
 	// Minus 1 to indicate the query is finished, if the count is 0, signal the resolver that it is ready
-	//defer func() {
-	//	r.queriesCount.Add(-1)
-	//	if r.queriesCount.Load() == 0 {
-	//		r.signalReady()
-	//	}
-	//}()
+	defer func() {
+		r.queriesCount.Add(-1)
+		if r.queriesCount.Load() == 0 {
+			r.signalReady()
+		}
+	}()
 
 	// Get the remote address
 	addrStr := net.JoinHostPort(remoteIP, "53")
@@ -361,6 +361,7 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 			answerResp := dns.Msg{}
 			answerResp.SetReply(r.entry.msg)
 			answerResp.Authoritative = true
+			answerResp.Answer = append(answerResp.Answer, rr)
 			entry := Entry{
 				msg:  &answerResp,
 				addr: r.entry.addr,
@@ -385,12 +386,20 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 
 	// Handle Authoritative RRs
 	for _, rr := range resp.Ns {
+		if rr.Header().Rrtype != dns.TypeNS {
+			log.Printf("Ignore non-NS record in Authoritative RRs: %d\n", rr.Header().Rrtype)
+			continue
+		}
 		zone := r.getZone(rr.Header().Name)
 		zone.addNS(rr)
 	}
 
 	// Handle Additional RRs
 	for _, rr := range resp.Extra {
+		if rr.Header().Rrtype == dns.TypeOPT {
+			log.Println("Ignore OPT record")
+			continue
+		}
 		zone := r.findZone(rr.Header().Name)
 		if zone == nil {
 			continue
@@ -398,10 +407,7 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 		zone.addGlue(rr, true)
 	}
 
-	//log.Printf("One query finished, current zone: %s, queries count: %d\n", r.stack[r.currentZoneIdx].name, r.queriesCount.Load())
 	r.dump()
-	//log.Println("Cache")
-	//fmt.Println(r.globalCache.toString())
 	log.Println("----------------------------------------")
 
 	// Check if resolver needs to go into next zone
@@ -456,9 +462,11 @@ func (z *Zone) addNS(rr dns.RR) {
 	for i, ns := range z.ns {
 		if dns.IsDuplicate(rr, ns) {
 			z.ns[i] = rr
+			return
 		}
-		z.ns = append(z.ns, rr)
 	}
+
+	z.ns = append(z.ns, rr)
 }
 
 func (z *Zone) addGlue(rr dns.RR, trust bool) {
@@ -478,6 +486,53 @@ func (z *Zone) addGlue(rr dns.RR, trust bool) {
 	default:
 		log.Printf("Cannot add unsupported record type %d to Zone %s\n", rr.Header().Rrtype, z.name)
 	}
+}
+
+// Get a random unsearched NS from the zone
+func (z *Zone) getRandomNS() (*dns.NS, error) {
+	z.mutex.Lock()
+	defer z.mutex.Unlock()
+
+	// Shuffle the NS records
+	shuffled := make([]dns.RR, len(z.ns))
+	copy(shuffled, z.ns)
+	rand.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
+
+	// Get a non-searched NS
+	for _, rr := range shuffled {
+		switch ns := rr.(type) {
+		case *dns.NS:
+			if !slices.Contains(z.searchedNS, ns.Ns) {
+				return ns, nil
+			}
+		default:
+			return nil, fmt.Errorf("Non-NS record during random NS: %d", rr.Header().Rrtype)
+		}
+	}
+	return nil, nil
+}
+
+func (z *Zone) getGlue(domain string, supportIPv6 bool) ([]dns.RR, error) {
+	z.mutex.Lock()
+	defer z.mutex.Unlock()
+
+	result := make([]dns.RR, 0)
+
+	for _, glue := range z.glueA {
+		if dns.Fqdn(glue.Header().Name) == dns.Fqdn(domain) {
+			result = append(result, glue)
+		}
+	}
+
+	if supportIPv6 {
+		for _, glue := range z.glueAAAA {
+			if dns.Fqdn(glue.Header().Name) == dns.Fqdn(domain) {
+				result = append(result, glue)
+			}
+		}
+	}
+
+	return result, nil
 }
 
 func (r *Resolver) signalReady() {
@@ -528,68 +583,25 @@ func newDnsQueryMsg(id uint16, name string, t uint16) *dns.Msg {
 
 func (r *Resolver) dump() {
 	for _, zone := range r.stack {
-		fmt.Println("Zone: ", zone.name)
-
-		fmt.Println("  NS:")
-		for _, ns := range zone.ns {
-			fmt.Println("    ", ns.String())
-		}
-
-		fmt.Println("  Glue A:")
-		for _, glue := range zone.glueA {
-			fmt.Println("    ", glue.String())
-		}
-
-		fmt.Println("  Glue AAAA:")
-		for _, glue := range zone.glueAAAA {
-			fmt.Println("    ", glue.String())
-		}
+		zone.dump()
 	}
 }
 
-// Get a random unsearched NS from the zone
-func (z *Zone) getRandomNS() (*dns.NS, error) {
-	z.mutex.Lock()
-	defer z.mutex.Unlock()
+func (z *Zone) dump() {
+	fmt.Println("Zone: ", z.name)
 
-	// Shuffle the NS records
-	shuffled := make([]dns.RR, len(z.ns))
-	copy(shuffled, z.ns)
-	rand.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
-
-	// Get a non-searched NS
-	for _, rr := range shuffled {
-		switch ns := rr.(type) {
-		case *dns.NS:
-			if !slices.Contains(z.searchedNS, ns.Ns) {
-				return ns, nil
-			}
-		default:
-			return nil, fmt.Errorf("Non-NS record during random NS: %d", rr.Header().Rrtype)
-		}
+	fmt.Println("  NS:")
+	for _, ns := range z.ns {
+		fmt.Println("    ", ns.String())
 	}
-	return nil, nil
-}
 
-func (z *Zone) getGlue(domain string, supportIPv6 bool) ([]dns.RR, error) {
-	z.mutex.Lock()
-	defer z.mutex.Unlock()
-
-	result := make([]dns.RR, 0)
-
+	fmt.Println("  Glue A:")
 	for _, glue := range z.glueA {
-		if dns.Fqdn(glue.Header().Name) == dns.Fqdn(domain) {
-			result = append(result, glue)
-		}
+		fmt.Println("    ", glue.String())
 	}
 
-	if supportIPv6 {
-		for _, glue := range z.glueAAAA {
-			if dns.Fqdn(glue.Header().Name) == dns.Fqdn(domain) {
-				result = append(result, glue)
-			}
-		}
+	fmt.Println("  Glue AAAA:")
+	for _, glue := range z.glueAAAA {
+		fmt.Println("    ", glue.String())
 	}
-
-	return result, nil
 }
