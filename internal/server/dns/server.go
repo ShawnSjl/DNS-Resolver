@@ -69,6 +69,8 @@ func NewDNSServer(parent context.Context) *Server {
 	server.insideRequestHandler()
 	server.insideResponseHandler()
 
+	// TODO: check IPv6 support
+
 	return server
 }
 

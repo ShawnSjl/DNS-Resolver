@@ -7,7 +7,7 @@ import (
 	"log"
 	"math/rand/v2"
 	"net"
-	"strings"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -63,29 +63,13 @@ type Resolver struct {
 type Zone struct {
 	name  string     // i.e. ".", "com.", "example.com."
 	mutex sync.Mutex // lock of nodes
-	nodes []*Node
+
+	ns       []dns.RR
+	glueA    []dns.RR
+	glueAAAA []dns.RR
+
+	searchedNS []string
 }
-
-type Node struct {
-	rr    dns.RR
-	getAt time.Time
-
-	state        QueryState
-	errorCount   int // number of times the node has error during the query
-	timeoutCount int // number of times the node has timed out during the query
-}
-
-type QueryState int
-
-const (
-	StateUnknown       QueryState = iota
-	StateHasAddress               // already has A or AAAA record
-	StateAddressNeeded            // no A or AAAA record, need to query
-	StateSuccess                  // the query succeeded
-	StateZeroAnswer               // the query returned no answer
-	StateError                    // the query failed
-	StateTimeout                  // the query timed out
-)
 
 // ******************** Initialization Interface **********************
 
@@ -126,35 +110,33 @@ func NewResolver(server *Server, entry Entry) *Resolver {
 
 func (r *Resolver) createRootZone() *Zone {
 	rootZone := &Zone{
-		name:  ".",
-		nodes: []*Node{},
+		name:       ".",
+		ns:         []dns.RR{},
+		glueA:      []dns.RR{},
+		glueAAAA:   []dns.RR{},
+		searchedNS: []string{},
 	}
 
-	for _, dnsServer := range rootDNS {
-		// Get A record of root-servers.net from cache
-		if v4RootRR, ok := r.globalCache.get(dnsServer, dns.TypeA, dns.ClassINET); ok {
-			// Create node of RR with type A root-servers.net
-			v4Node := &Node{
-				rr:           v4RootRR,
-				getAt:        time.Now(),
-				state:        StateHasAddress,
-				errorCount:   0,
-				timeoutCount: 0,
-			}
-			rootZone.nodes = append(rootZone.nodes, v4Node)
-		}
+	// Get NS record of root from cache
+	if rootNS, ok := r.globalCache.get(".", dns.TypeNS, dns.ClassINET); ok {
+		rootZone.ns = append(rootZone.ns, rootNS...)
+	}
 
-		// Get AAAA record of root-servers.net from cache
-		if v6RootRR, ok := r.globalCache.get(dnsServer, dns.TypeAAAA, dns.ClassINET); ok {
-			// Create node of RR with type AAAA root-servers.net
-			v6Node := &Node{
-				rr:           v6RootRR,
-				getAt:        time.Now(),
-				state:        StateHasAddress,
-				errorCount:   0,
-				timeoutCount: 0,
+	// Get glue records of root from cache
+	for _, rootNS := range rootZone.ns {
+		switch ns := rootNS.(type) {
+		case *dns.NS:
+			// Get A record of root-servers.net from cache
+			if rootA, ok := r.globalCache.get(ns.Ns, dns.TypeA, dns.ClassINET); ok {
+				rootZone.glueA = append(rootZone.glueA, rootA...)
 			}
-			rootZone.nodes = append(rootZone.nodes, v6Node)
+
+			// Get AAAA record of root-servers.net from cache
+			if rootAAAA, ok := r.globalCache.get(ns.Ns, dns.TypeAAAA, dns.ClassINET); ok {
+				rootZone.glueAAAA = append(rootZone.glueAAAA, rootAAAA...)
+			}
+		default:
+			log.Printf("Get non-NS record in NS RRSet during Root zone initialization: %d\n", ns.Header().Rrtype)
 		}
 	}
 
@@ -179,109 +161,109 @@ func (r *Resolver) resolve() {
 				// Get current zone
 				currentZone := r.stack[r.currentZoneIdx]
 
-				/* Iterate through all nodes in the current zone, query the node if it needs an address */
-				// Check if there is a node that needs an address
-				var node *Node
-				for _, n := range currentZone.nodes {
-					if n.state == StateAddressNeeded {
-						node = n
-						break
-					}
-				}
-				// If there is a node that needs an address, query it
-				if node != nil {
-					// TODO: need to resolve this domain name to an IP address
-					log.Printf("Node %s needs an address, not implement yet\n", node.rr.String())
-					continue ResolveLoop
-				}
-
-				/* Randomly choose a node to query */
-				// Now all nodes should have a valid record, shuffle them
-				shuffled := make([]*Node, len(currentZone.nodes))
-				copy(shuffled, currentZone.nodes)
-				rand.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
-
-				// Check if there is a node that has not queried yet
-				for _, n := range shuffled {
-					// skip the node that has already queried
-					if n.state == StateZeroAnswer || n.state == StateSuccess ||
-						(n.state == StateError && n.errorCount >= 2) ||
-						(n.state == StateTimeout && n.timeoutCount >= 3) {
-						continue
-					}
-
-					// Generate a new DNS query message
-					msg := newDnsQueryMsg(r.currTransactionID, r.goal, r.goalType)
-
-					// Send the query based on the record type
-					switch n.rr.Header().Rrtype {
-					case dns.TypeA:
-						r.queriesCount.Add(1)
-						go r.sendQuery(n, msg, n.rr.(*dns.A).A.String())
-						continue ResolveLoop
-					case dns.TypeAAAA:
-						r.queriesCount.Add(1)
-						go r.sendQuery(n, msg, n.rr.(*dns.AAAA).AAAA.String())
-						continue ResolveLoop
-					default:
-						log.Println("Unsupported record type during query: ", n.rr.Header().Rrtype)
-						n.state = StateAddressNeeded
-					}
-				}
-
-				/* Fallback to the previous zone */
-				// If there is only one zone left, there is no need to fallback
-				if len(r.stack) == 1 || r.currentZoneIdx == 0 {
-					log.Println("All root NS has been queried, and there is no answer")
-
-					// send failure response to the client
-					resp := dns.Msg{}
-					resp.SetReply(r.entry.msg)
-					resp.Rcode = dns.RcodeNameError
-					entry := Entry{
-						msg:  &resp,
-						addr: r.entry.addr,
-					}
-					r.server.insideSendQueue <- entry
-
-					// exit the resolver
+				// Get random unsearched NS record from current zone
+				ns, getErr := currentZone.getRandomNS()
+				if getErr != nil {
+					log.Println("Fail to get random NS record: ", getErr)
 					r.terminate()
 					continue ResolveLoop
 				}
 
-				// If all nodes have been queried, return to the previous zone
-				log.Println("All nodes have been queried, return to the previous zone")
-				r.currentZoneIdx--
-				r.signalReady()
-				continue ResolveLoop
+				// If there is no NS unsearched record in current zone, fallback to the previous zone
+				if ns == nil {
+					// If there is only one zone left, there is no need to fallback
+					if len(r.stack) == 1 || r.currentZoneIdx == 0 {
+						log.Println("All root NS has been queried, and there is no answer")
+
+						// send failure response to the client
+						resp := dns.Msg{}
+						resp.SetReply(r.entry.msg)
+						resp.Rcode = dns.RcodeNameError
+						entry := Entry{
+							msg:  &resp,
+							addr: r.entry.addr,
+						}
+						r.server.insideSendQueue <- entry
+
+						// exit the resolver
+						r.terminate()
+						continue ResolveLoop
+					}
+
+					// Fallback to the previous zone
+					log.Println("No NS record in current zone, fallback to the previous zone")
+					r.currentZoneIdx--
+					r.signalReady()
+					continue ResolveLoop
+				}
+
+				log.Printf("[debug] current zone: %s, NS record: %s\n", currentZone.name, ns.String())
+
+				// Get glue records of the NS record
+				glues, glueErr := currentZone.getGlue(ns.Ns)
+				if glueErr != nil {
+					log.Println("Fail to get glue records of NS record: ", glueErr)
+					r.terminate()
+					continue ResolveLoop
+				}
+
+				// TODO: If there is no available glue record, query for it
+				if len(glues) == 0 {
+					log.Println("No glue record available for NS record: ", ns.Ns)
+					log.Println("Not implemented yet")
+					r.terminate()
+					continue ResolveLoop
+				}
+
+				// Choose a glue record randomly and get its IP address
+				glue := glues[rand.IntN(len(glues))]
+				var remoteIP string
+				switch rr := glue.(type) {
+				case *dns.A:
+					remoteIP = rr.A.String()
+				case *dns.AAAA:
+					remoteIP = rr.AAAA.String()
+				default:
+					log.Println("Unsupported glue record type during query: ", ns.Ns)
+					r.terminate()
+					continue ResolveLoop
+				}
+
+				// Send the query to the chosen glue server
+				go func() {
+					r.queriesCount.Add(1)
+					sendErr := r.sendQuery(remoteIP)
+					if sendErr != nil {
+						log.Println("Fail to send query: ", sendErr)
+					} else {
+						currentZone.searchedNS = append(currentZone.searchedNS, ns.Ns)
+					}
+				}()
 			}
 		}
 	}()
 }
 
-func (r *Resolver) sendQuery(node *Node, req *dns.Msg, remoteIP string) {
+func (r *Resolver) sendQuery(remoteIP string) error {
 	// Minus 1 to indicate the query is finished, if the count is 0, signal the resolver that it is ready
-	defer func() {
-		r.queriesCount.Add(-1)
-		if r.queriesCount.Load() == 0 {
-			r.signalReady()
-		}
-	}()
+	//defer func() {
+	//	r.queriesCount.Add(-1)
+	//	if r.queriesCount.Load() == 0 {
+	//		r.signalReady()
+	//	}
+	//}()
 
 	// Get the remote address
 	addrStr := net.JoinHostPort(remoteIP, "53")
 	remoteAddr, resolveErr := net.ResolveUDPAddr("udp", addrStr)
 	if resolveErr != nil {
-		log.Printf("Fail to resolve UDP address %s: %e\n", addrStr, resolveErr)
-		node.state = StateError
-		node.errorCount++
-		return
+		return fmt.Errorf("fail to resolve UDP address %s: %e", addrStr, resolveErr)
 	}
 
 	// Wait for the query signal
 	select {
 	case <-r.ctx.Done():
-		return
+		return fmt.Errorf("resolver context is done")
 	case <-r.table.querySignal:
 		r.table.resetTimer()
 	}
@@ -289,10 +271,7 @@ func (r *Resolver) sendQuery(node *Node, req *dns.Msg, remoteIP string) {
 	// Create a UDP connection
 	conn, connErr := net.DialUDP("udp", nil, remoteAddr)
 	if connErr != nil {
-		log.Println("Fail to dial UDP: ", connErr)
-		node.state = StateError
-		node.errorCount++
-		return
+		return fmt.Errorf("fail to dial UDP: %e", connErr)
 	}
 	defer func(conn *net.UDPConn) {
 		err := conn.Close()
@@ -301,29 +280,24 @@ func (r *Resolver) sendQuery(node *Node, req *dns.Msg, remoteIP string) {
 		}
 	}(conn)
 
+	// Set the deadline for the connection
 	setErr := conn.SetDeadline(time.Now().Add(timeoutInterval))
 	if setErr != nil {
-		log.Println("Fail to set write deadline: ", setErr)
-		node.state = StateError
-		node.errorCount++
-		return
+		return fmt.Errorf("fail to set UDP connection deadline: %e", setErr)
 	}
+
+	// Generate a new DNS query message
+	req := newDnsQueryMsg(r.currTransactionID, r.goal, r.goalType)
 
 	// Pack the DNS query
 	payload, packErr := req.Pack()
 	if packErr != nil {
-		log.Println("Fail to pack DNS query: ", packErr)
-		node.state = StateError
-		node.errorCount++
-		return
+		return fmt.Errorf("fail to pack DNS query: %e", packErr)
 	}
 
 	// Send the DNS query
 	if _, sendErr := conn.Write(payload); sendErr != nil {
-		log.Println("Fail to send DNS query: ", sendErr)
-		node.state = StateError
-		node.errorCount++
-		return
+		return fmt.Errorf("fail to send DNS query: %e", sendErr)
 	}
 
 	// Get the buffer size based on the remote address
@@ -343,15 +317,10 @@ func (r *Resolver) sendQuery(node *Node, req *dns.Msg, remoteIP string) {
 			// Check if the error is a timeout
 			var ne net.Error
 			if errors.As(readErr, &ne) && ne.Timeout() {
-				node.state = StateTimeout
-				node.timeoutCount++
-				return
+				return fmt.Errorf("UDP connection timeout: %e", readErr)
 			}
 
-			log.Println("Fail to read from UDP connection: ", readErr)
-			node.state = StateError
-			node.errorCount++
-			return
+			return fmt.Errorf("fail to read from UDP connection: %e", readErr)
 		}
 
 		// Check the source address of the response
@@ -368,26 +337,21 @@ func (r *Resolver) sendQuery(node *Node, req *dns.Msg, remoteIP string) {
 	// Unpack the DNS response
 	var resp dns.Msg
 	if unpackErr := resp.Unpack(buf[:nByte]); unpackErr != nil {
-		log.Println("Fail to unpack DNS response: ", unpackErr)
-		node.state = StateError
-		node.errorCount++
-		return
+		return fmt.Errorf("fail to unpack DNS response: %e", unpackErr)
 	}
 
 	// If the response is not a DNS response
 	if !resp.Response {
-		node.state = StateError
-		node.errorCount++
-		return
+		return fmt.Errorf("received non-response DNS message")
 	}
 
 	// Check if the response has no answer
 	if len(resp.Answer) == 0 && len(resp.Ns) == 0 {
-		node.state = StateZeroAnswer
-		return
+		log.Println("Received DNS response with no answer")
+		return nil
 	}
 
-	// TODO: support Cache later
+	log.Printf("[debug] received %d answers, %d NS records, %d additional records\n", len(resp.Answer), len(resp.Ns), len(resp.Extra))
 
 	// Handle the Answers in the response
 	for _, rr := range resp.Answer {
@@ -404,33 +368,40 @@ func (r *Resolver) sendQuery(node *Node, req *dns.Msg, remoteIP string) {
 			r.server.insideSendQueue <- entry
 
 			// Add answer to global cache
-			r.globalCache.add(rr)
+			r.globalCache.add(rr, true)
 
 			log.Println("Get answer during query: ", rr.String())
 			r.terminate()
-			return
+			return nil
 		}
 
-		zone := r.getZone(rr.Header().Name)
-		zone.addRecord(rr)
+		// Add answer to local cache of glue
+		zone := r.findZone(rr.Header().Name)
+		if zone == nil {
+			continue
+		}
+		zone.addGlue(rr, true)
 	}
 
 	// Handle Authoritative RRs
 	for _, rr := range resp.Ns {
 		zone := r.getZone(rr.Header().Name)
-		zone.addRecord(rr)
+		zone.addNS(rr)
 	}
 
 	// Handle Additional RRs
 	for _, rr := range resp.Extra {
-		zone := r.getZone(rr.Header().Name) // FIXME: cannot get zone by rr.Header().Name in here
-		zone.handleGlue(rr)
+		zone := r.findZone(rr.Header().Name)
+		if zone == nil {
+			continue
+		}
+		zone.addGlue(rr, true)
 	}
 
-	log.Printf("One query finished, current zone: %s, queries count: %d\n", r.stack[r.currentZoneIdx].name, r.queriesCount.Load())
+	//log.Printf("One query finished, current zone: %s, queries count: %d\n", r.stack[r.currentZoneIdx].name, r.queriesCount.Load())
 	r.dump()
-	log.Println("Cache")
-	fmt.Println(r.globalCache.toString())
+	//log.Println("Cache")
+	//fmt.Println(r.globalCache.toString())
 	log.Println("----------------------------------------")
 
 	// Check if resolver needs to go into next zone
@@ -439,6 +410,7 @@ func (r *Resolver) sendQuery(node *Node, req *dns.Msg, remoteIP string) {
 			r.currentZoneIdx++
 		}
 	}
+	return nil
 }
 
 func (r *Resolver) getZone(name string) *Zone {
@@ -452,66 +424,60 @@ func (r *Resolver) getZone(name string) *Zone {
 	}
 
 	zone := &Zone{
-		name:  name,
-		mutex: sync.Mutex{},
-		nodes: make([]*Node, 0),
+		name:       name,
+		mutex:      sync.Mutex{},
+		ns:         []dns.RR{},
+		glueA:      []dns.RR{},
+		glueAAAA:   []dns.RR{},
+		searchedNS: []string{},
 	}
 	r.stack = append(r.stack, zone)
 	return zone
 }
 
-func (z *Zone) addRecord(rr dns.RR) {
-	z.mutex.Lock()
-	defer z.mutex.Unlock()
+func (r *Resolver) findZone(name string) *Zone {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
 
-	// TODO: handle the timeout case
-
-	// Iterate through current node to check duplicate
-	for _, node := range z.nodes {
-		// Check if there is a same RR in the node
-		if dns.IsDuplicate(node.rr, rr) {
-			node.rr = rr
-			node.getAt = time.Now()
-			return
+	for _, zone := range r.stack {
+		for _, ns := range zone.ns {
+			if ns.(*dns.NS).Ns == name {
+				return zone
+			}
 		}
 	}
-
-	// Create a new node for this RR
-	z.nodes = append(z.nodes, &Node{
-		rr:           rr,
-		getAt:        time.Now(),
-		state:        StateAddressNeeded,
-		errorCount:   0,
-		timeoutCount: 0,
-	})
+	return nil
 }
 
-func (z *Zone) handleGlue(rr dns.RR) {
+func (z *Zone) addNS(rr dns.RR) {
 	z.mutex.Lock()
 	defer z.mutex.Unlock()
 
-	// If record is in bailiwick
-	if strings.HasSuffix(rr.Header().Name, z.name) {
-		// TODO: cache the glue record
-
-		switch rr.Header().Rrtype {
-		case dns.TypeA, dns.TypeAAAA:
-			for _, node := range z.nodes {
-				switch node.rr.Header().Rrtype {
-				case dns.TypeNS:
-					if rr.Header().Name == node.rr.(*dns.NS).Ns {
-						node.state = StateHasAddress
-					}
-				}
-			}
-		default:
-			log.Println("Unsupported record type during glue: ", rr.Header().Rrtype)
+	for i, ns := range z.ns {
+		if dns.IsDuplicate(rr, ns) {
+			z.ns[i] = rr
 		}
+		z.ns = append(z.ns, rr)
+	}
+}
+
+func (z *Zone) addGlue(rr dns.RR, trust bool) {
+	z.mutex.Lock()
+	defer z.mutex.Unlock()
+
+	if !trust {
+		// TODO: check if glue record is in bailiwick
+		log.Printf("Check if glue record is in bailiwick, not implement yet\n")
 	}
 
-	log.Println("Record: ", rr.String(), " is not in bailiwick, ignore it")
-
-	// Right now only glue the records in bailiwick
+	switch rr.Header().Rrtype {
+	case dns.TypeA:
+		z.glueA = append(z.glueA, rr)
+	case dns.TypeAAAA:
+		z.glueAAAA = append(z.glueAAAA, rr)
+	default:
+		log.Printf("Cannot add unsupported record type %d to Zone %s\n", rr.Header().Rrtype, z.name)
+	}
 }
 
 func (r *Resolver) signalReady() {
@@ -563,8 +529,65 @@ func newDnsQueryMsg(id uint16, name string, t uint16) *dns.Msg {
 func (r *Resolver) dump() {
 	for _, zone := range r.stack {
 		fmt.Println("Zone: ", zone.name)
-		for _, node := range zone.nodes {
-			fmt.Println("  Node: ", node.rr.String())
+
+		fmt.Println("  NS:")
+		for _, ns := range zone.ns {
+			fmt.Println("    ", ns.String())
+		}
+
+		fmt.Println("  Glue A:")
+		for _, glue := range zone.glueA {
+			fmt.Println("    ", glue.String())
+		}
+
+		fmt.Println("  Glue AAAA:")
+		for _, glue := range zone.glueAAAA {
+			fmt.Println("    ", glue.String())
 		}
 	}
+}
+
+// Get a random unsearched NS from the zone
+func (z *Zone) getRandomNS() (*dns.NS, error) {
+	z.mutex.Lock()
+	defer z.mutex.Unlock()
+
+	// Shuffle the NS records
+	shuffled := make([]dns.RR, len(z.ns))
+	copy(shuffled, z.ns)
+	rand.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
+
+	// Get a non-searched NS
+	for _, rr := range shuffled {
+		switch ns := rr.(type) {
+		case *dns.NS:
+			if !slices.Contains(z.searchedNS, ns.Ns) {
+				return ns, nil
+			}
+		default:
+			return nil, fmt.Errorf("Non-NS record during random NS: %d", rr.Header().Rrtype)
+		}
+	}
+	return nil, nil
+}
+
+func (z *Zone) getGlue(domain string) ([]dns.RR, error) {
+	z.mutex.Lock()
+	defer z.mutex.Unlock()
+
+	result := make([]dns.RR, 0)
+
+	for _, glue := range z.glueA {
+		if dns.Fqdn(glue.Header().Name) == dns.Fqdn(domain) {
+			result = append(result, glue)
+		}
+	}
+
+	for _, glue := range z.glueAAAA {
+		if dns.Fqdn(glue.Header().Name) == dns.Fqdn(domain) {
+			result = append(result, glue)
+		}
+	}
+
+	return result, nil
 }

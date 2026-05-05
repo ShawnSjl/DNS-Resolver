@@ -7,6 +7,22 @@ import (
 	"github.com/miekg/dns"
 )
 
+var rootHintsNS = []dns.NS{
+	{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: math.MaxUint32}, Ns: "a.root-servers.net."},
+	{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: math.MaxUint32}, Ns: "b.root-servers.net."},
+	{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: math.MaxUint32}, Ns: "c.root-servers.net."},
+	{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: math.MaxUint32}, Ns: "d.root-servers.net."},
+	{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: math.MaxUint32}, Ns: "e.root-servers.net."},
+	{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: math.MaxUint32}, Ns: "f.root-servers.net."},
+	{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: math.MaxUint32}, Ns: "g.root-servers.net."},
+	{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: math.MaxUint32}, Ns: "h.root-servers.net."},
+	{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: math.MaxUint32}, Ns: "i.root-servers.net."},
+	{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: math.MaxUint32}, Ns: "j.root-servers.net."},
+	{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: math.MaxUint32}, Ns: "k.root-servers.net."},
+	{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: math.MaxUint32}, Ns: "l.root-servers.net."},
+	{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: math.MaxUint32}, Ns: "m.root-servers.net."},
+}
+
 var rootHintsA = []dns.A{
 	{Hdr: dns.RR_Header{Name: "a.root-servers.net.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: math.MaxUint32}, A: net.ParseIP("198.41.0.4")},
 	{Hdr: dns.RR_Header{Name: "b.root-servers.net.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: math.MaxUint32}, A: net.ParseIP("170.247.170.2")},
@@ -40,10 +56,13 @@ var rootHintsAAAA = []dns.AAAA{
 }
 
 func (s *Server) loadRootHints() {
+	for _, rr := range rootHintsNS {
+		s.cache.add(&rr, false)
+	}
 	for _, rr := range rootHintsA {
-		s.cache.add(&rr)
+		s.cache.add(&rr, false)
 	}
 	for _, rr := range rootHintsAAAA {
-		s.cache.add(&rr)
+		s.cache.add(&rr, false)
 	}
 }

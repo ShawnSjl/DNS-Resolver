@@ -94,7 +94,7 @@ func (c *RecordCache) startTTLTimer() {
 
 // ******************** Interface **********************
 
-func (c *RecordCache) add(rr dns.RR) {
+func (c *RecordCache) add(rr dns.RR, limitTTL bool) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -104,7 +104,13 @@ func (c *RecordCache) add(rr dns.RR) {
 		qClass: rr.Header().Class,
 	}
 
-	rr.Header().Ttl = min(rr.Header().Ttl, MaxTTL) // limit TTL to 7 days
+	if limitTTL {
+		rr.Header().Ttl = min(rr.Header().Ttl, MaxTTL) // limit TTL to 7 days
+	}
+
+	if _, ok := c.records[key]; !ok {
+		c.records[key] = RRSet{rrs: make(map[string]dns.RR)}
+	}
 
 	rrSet := c.records[key]
 	rrSet.add(rr)
@@ -161,11 +167,16 @@ func (c *RecordCache) toString() string {
 
 	var list []string
 
-	for _, rrSet := range c.records {
+	for rrSetKey, rrSet := range c.records {
+		list = append(list, fmt.Sprintf("RRSet: %s %d %d", rrSetKey.domain, rrSetKey.qType, rrSetKey.qClass))
 		for _, rr := range rrSet.rrs {
 			list = append(list, rr.String())
 		}
 	}
 
 	return strings.Join(list, "\n")
+}
+
+func (c *RecordCache) dump() {
+	fmt.Println(c.toString())
 }
