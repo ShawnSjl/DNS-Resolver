@@ -15,6 +15,7 @@ import (
 
 func main() {
 	// setup flags
+	logFlag := flag.String("log", "info", "log level")
 	dnsPortFlag := flag.String("port", "53", "port to listen DNS messages")
 	controllerPortFlag := flag.String("controller-port", "7878", "port to listen controller messages")
 	flag.Parse()
@@ -35,8 +36,22 @@ func main() {
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// create logger
+	var level slog.Level
+	switch *logFlag {
+	case "debug":
+		level = slog.LevelDebug
+	case "info":
+		level = slog.LevelInfo
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
 	opts := &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: level,
 	}
 	handler := slog.NewTextHandler(os.Stdout, opts)
 	logger := slog.New(handler)

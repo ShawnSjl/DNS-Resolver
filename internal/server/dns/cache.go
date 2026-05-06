@@ -41,7 +41,7 @@ func newRecordCache(parent context.Context, logger *slog.Logger) *RecordCache {
 
 	cache := &RecordCache{
 		ctx:     ctx,
-		logger:  logger.With("module", "cache"),
+		logger:  logger.WithGroup("cache"),
 		records: make(map[RRSetKey]RRSet),
 		mutex:   sync.RWMutex{},
 	}

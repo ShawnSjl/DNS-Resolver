@@ -63,7 +63,7 @@ func NewResolver(server *Server, entry Entry, logger *slog.Logger) *Resolver {
 	resolver := &Resolver{
 		ctx:    ctx,
 		cancel: cancel,
-		logger: logger.With("module", "resolver", "goal", entry.msg.Question[0].Name, "type", entry.msg.Question[0].Qtype),
+		logger: logger.WithGroup("resolver").With("goal", entry.msg.Question[0].Name, "type", entry.msg.Question[0].Qtype),
 
 		server:      server,
 		globalCache: server.cache,
@@ -91,7 +91,7 @@ func NewResolver(server *Server, entry Entry, logger *slog.Logger) *Resolver {
 }
 
 func (r *Resolver) createRootZone(logger *slog.Logger) *Zone {
-	logger = logger.With("module", "resolver", "zone", ".")
+	logger = logger.With("zone", ".")
 	rootZone := &Zone{
 		name:       ".",
 		ns:         []dns.RR{},
@@ -371,10 +371,7 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 			// Add answer to global cache
 			r.globalCache.add(rr, true)
 
-			r.logger.Info("Get answer during query",
-				"type", rr.Header().Rrtype,
-				"name", rr.Header().Name,
-			)
+			r.logger.Info("Get answer during query")
 			r.terminate()
 			return nil
 		}
@@ -391,7 +388,8 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 	for _, rr := range resp.Ns {
 		if rr.Header().Rrtype != dns.TypeNS {
 			// TODO: new feature: resolver not support DNSSEC yet
-			r.logger.Warn("Resolver not support DNSSEC yet, ignore non-NS record in Authoritative RRs", "type", rr.Header().Rrtype)
+			r.logger.Warn("Resolver not support DNSSEC yet, ignore non-NS record in Authoritative RRs", "rr-type",
+				rr.Header().Rrtype)
 			continue
 		}
 		zone := r.getZone(rr.Header().Name)
