@@ -11,6 +11,8 @@ type Blocklist struct {
 	patterns map[string]struct{}
 }
 
+// ******************** Initialization Interface **********************
+
 func New(domains []string) *Blocklist {
 	b := &Blocklist{patterns: make(map[string]struct{})}
 	for _, domain := range domains {
@@ -18,6 +20,8 @@ func New(domains []string) *Blocklist {
 	}
 	return b
 }
+
+// ******************** Public Interface **********************
 
 func (b *Blocklist) Add(domain string) {
 	// Normalize once before storing.
@@ -71,6 +75,8 @@ func (b *Blocklist) List() []string {
 	sort.Strings(out)
 	return out
 }
+
+// ******************** Help Function **********************
 
 func normalizeName(domain string) string {
 	// Drop case and the final DNS root dot.

@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/brown-cs1680-s26/final-jiale-xinran/internal/server/blocklist"
 	"github.com/miekg/dns"
 )
 
@@ -37,7 +38,7 @@ type Server struct {
 	insideReceiveQueue chan Entry
 
 	// blocked domains
-	blocked *Blacklist
+	blocked *blocklist.Blocklist
 
 	// global cache
 	cache *RecordCache
@@ -68,7 +69,7 @@ func NewDNSServer(parent context.Context) *Server {
 		insideSendQueue:    make(chan Entry, queueSize),
 		insideReceiveQueue: make(chan Entry, queueSize),
 
-		blocked:     newBlacklist(),
+		blocked:     blocklist.New(nil),
 		cache:       newRecordCache(ctx),
 		idPool:      newTransactionIDPool(),
 		querySignal: make(chan bool, 1),
@@ -236,7 +237,7 @@ func (s *Server) insideRequestHandler() {
 				log.Printf("Question: %s\n", question.Name)
 
 				// Check if the domain is blocked
-				if s.blocked.contains(question.Name) {
+				if s.blocked.Contains(question.Name) {
 					s.handleBlocked(reqEntry.addr, reqEntry.msg)
 					continue
 				}
