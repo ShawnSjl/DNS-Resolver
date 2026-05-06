@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -371,4 +372,24 @@ func (s *Server) sendIntervalTimer() {
 
 func (s *Server) resetTimer() {
 	s.timer.Reset(queryInterval)
+}
+
+// ******************** Public Interface **********************
+
+func (s *Server) Block(domain string) bool {
+	s.blocked.Add(domain)
+	return true
+}
+
+func (s *Server) Unblock(domain string) bool {
+	s.blocked.Remove(domain)
+	return true
+}
+
+func (s *Server) ListBlocked() string {
+	return strings.Join(s.blocked.List(), "\n")
+}
+
+func (s *Server) ListCache() string {
+	return s.cache.toString()
 }
