@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync/atomic"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -18,13 +20,15 @@ const (
 	UDP6MTU        = MTU - IPv6HeaderSize - UDPHeaderSize
 
 	queueSize = 1024
+
+	queryInterval = 100 * time.Millisecond
 )
 
 type Server struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	supportIPv6 bool
+	supportIPv6 atomic.Bool
 
 	// inside
 	udpConnIPv4        *net.UDPConn
@@ -35,11 +39,15 @@ type Server struct {
 	// blocked domains
 	blocked *Blacklist
 
-	// cache
+	// global cache
 	cache *RecordCache
 
-	// request table
-	requestTable *RequestTable
+	// transaction ID pool
+	idPool *TransactionIDPool
+
+	// signal to tell the request to send a query to the remote server
+	timer       *time.Timer
+	querySignal chan bool
 }
 
 type Entry struct {
@@ -53,26 +61,31 @@ func NewDNSServer(parent context.Context) *Server {
 	ctx, cancel := context.WithCancel(parent)
 
 	server := &Server{
-		ctx:                ctx,
-		cancel:             cancel,
+		ctx:         ctx,
+		cancel:      cancel,
+		supportIPv6: atomic.Bool{},
+
 		insideSendQueue:    make(chan Entry, queueSize),
 		insideReceiveQueue: make(chan Entry, queueSize),
-		cache:              newRecordCache(ctx),
-		blocked:            newBlacklist(),
+
+		blocked:     newBlacklist(),
+		cache:       newRecordCache(ctx),
+		idPool:      newTransactionIDPool(),
+		querySignal: make(chan bool, 1),
 	}
 
 	// load root hints
 	server.loadRootHints()
-
-	// create request table
-	server.requestTable = newRequestTable(server)
 
 	// handle DNS requests and responses
 	server.insideRequestHandler()
 	server.insideResponseHandler()
 
 	// check IPv6 support
-	server.supportIPv6 = checkIPv6Support()
+	server.supportIPv6.Store(checkIPv6Support())
+
+	// start the timer to allow sending queries to the remote server
+	server.sendIntervalTimer()
 
 	return server
 }
@@ -324,4 +337,37 @@ func (s *Server) sendResponse(addr net.Addr, resp *dns.Msg) {
 	if n != len(data) {
 		log.Printf("Sent size %d didn't match message size %d\n", n, len(data))
 	}
+}
+
+// ******************** Outside DNS Request Timer **********************
+
+func (s *Server) sendIntervalTimer() {
+	go func() {
+		s.timer = time.NewTimer(0 * time.Second)
+
+		for {
+			select {
+			case <-s.ctx.Done():
+				if s.timer != nil && !s.timer.Stop() {
+					select {
+					case <-s.timer.C:
+					default:
+					}
+				}
+				return
+
+			case <-s.timer.C:
+				// Send a query to the remote server must wait for the timer.
+				// signal the request in a non-blocking way
+				select {
+				case s.querySignal <- true:
+				default:
+				}
+			}
+		}
+	}()
+}
+
+func (s *Server) resetTimer() {
+	s.timer.Reset(queryInterval)
 }

@@ -40,10 +40,7 @@ type Resolver struct {
 	cancel context.CancelFunc
 
 	server      *Server
-	table       *RequestTable
 	globalCache *RecordCache // cache for DNS records
-
-	localCache *RecordCache // cache for local records
 
 	// variables for the original query
 	entry    Entry // entry to store the original query request and address
@@ -82,10 +79,7 @@ func NewResolver(server *Server, entry Entry) *Resolver {
 		cancel: cancel,
 
 		server:      server,
-		table:       server.requestTable,
 		globalCache: server.cache,
-
-		localCache: newRecordCache(ctx),
 
 		entry:    entry,
 		goal:     entry.msg.Question[0].Name,
@@ -155,8 +149,8 @@ func (r *Resolver) resolve() {
 
 			case <-r.readySignal:
 				// Recycle old one and get new transaction ID for the current query
-				r.table.recycleTransactionID(r.currTransactionID)
-				r.currTransactionID = r.table.getNewTransactionID()
+				r.server.idPool.recycleTransactionID(r.currTransactionID)
+				r.currTransactionID = r.server.idPool.getNewTransactionID()
 
 				// Get current zone
 				currentZone := r.stack[r.currentZoneIdx]
@@ -200,7 +194,7 @@ func (r *Resolver) resolve() {
 				log.Printf("[debug] current zone: %s, NS record: %s\n", currentZone.name, ns.String())
 
 				// Get glue records of the NS record
-				glues, glueErr := currentZone.getGlue(ns.Ns, r.server.supportIPv6)
+				glues, glueErr := currentZone.getGlue(ns.Ns, r.server.supportIPv6.Load())
 				if glueErr != nil {
 					log.Println("Fail to get glue records of NS record: ", glueErr)
 					r.terminate()
@@ -264,8 +258,8 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 	select {
 	case <-r.ctx.Done():
 		return fmt.Errorf("resolver context is done")
-	case <-r.table.querySignal:
-		r.table.resetTimer()
+	case <-r.server.querySignal:
+		r.server.resetTimer()
 	}
 
 	// Create a UDP connection
@@ -543,7 +537,7 @@ func (r *Resolver) signalReady() {
 }
 
 func (r *Resolver) terminate() {
-	r.table.recycleTransactionID(r.currTransactionID)
+	r.server.idPool.recycleTransactionID(r.currTransactionID)
 	r.cancel()
 }
 
