@@ -3,6 +3,7 @@ package dns
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -15,7 +16,8 @@ const (
 )
 
 type RecordCache struct {
-	ctx context.Context
+	ctx    context.Context
+	logger *slog.Logger
 
 	records map[RRSetKey]RRSet
 	mutex   sync.RWMutex
@@ -33,12 +35,13 @@ type RRSet struct {
 
 // ******************** Initialization Interface **********************
 
-func newRecordCache(parent context.Context) *RecordCache {
+func newRecordCache(parent context.Context, logger *slog.Logger) *RecordCache {
 	// Create a child context without cancellation
 	ctx := context.WithoutCancel(parent)
 
 	cache := &RecordCache{
 		ctx:     ctx,
+		logger:  logger.With("module", "cache"),
 		records: make(map[RRSetKey]RRSet),
 		mutex:   sync.RWMutex{},
 	}
@@ -63,6 +66,7 @@ func (c *RecordCache) startTTLTimer() {
 				return
 
 			case <-ticker.C:
+				c.logger.Debug("TTL timer fired")
 				c.mutex.Lock()
 
 				for setKey, rrSet := range c.records {
@@ -114,6 +118,7 @@ func (c *RecordCache) add(rr dns.RR, limitTTL bool) {
 
 	rrSet := c.records[key]
 	rrSet.add(rr)
+	slog.Debug("Added RR to cache", "rr", rr.String())
 }
 
 func (s *RRSet) add(rr dns.RR) {
@@ -155,9 +160,11 @@ func (c *RecordCache) get(domain string, qType uint16, qClass uint16) ([]dns.RR,
 			r := dns.Copy(rr)
 			rrs = append(rrs, r)
 		}
+		slog.Debug("Cache hit", "domain", domain, "qType", qType, "rrs", rrs)
 		return rrs, true
 	}
 
+	slog.Debug("Cache miss", "domain", domain, "qType", qType)
 	return nil, false
 }
 

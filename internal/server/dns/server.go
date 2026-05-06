@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -27,8 +28,10 @@ const (
 )
 
 type Server struct {
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx        context.Context
+	cancel     context.CancelFunc
+	logger     *slog.Logger
+	rootLogger *slog.Logger
 
 	supportIPv6 atomic.Bool
 
@@ -44,9 +47,6 @@ type Server struct {
 	// global cache
 	cache *RecordCache
 
-	// transaction ID pool
-	idPool *TransactionIDPool
-
 	// signal to tell the request to send a query to the remote server
 	timer       *time.Timer
 	querySignal chan bool
@@ -59,20 +59,22 @@ type Entry struct {
 
 // ******************** Initialization Interface **********************
 
-func NewDNSServer(parent context.Context) *Server {
+func NewDNSServer(parent context.Context, logger *slog.Logger) *Server {
 	ctx, cancel := context.WithCancel(parent)
 
 	server := &Server{
-		ctx:         ctx,
-		cancel:      cancel,
+		ctx:        ctx,
+		cancel:     cancel,
+		logger:     logger.With("module", "dns-server"),
+		rootLogger: logger,
+
 		supportIPv6: atomic.Bool{},
 
 		insideSendQueue:    make(chan Entry, queueSize),
 		insideReceiveQueue: make(chan Entry, queueSize),
 
 		blocked:     blocklist.New(nil),
-		cache:       newRecordCache(ctx),
-		idPool:      newTransactionIDPool(),
+		cache:       newRecordCache(ctx, logger),
 		querySignal: make(chan bool, 1),
 	}
 
@@ -176,16 +178,22 @@ func (s *Server) readFromConn(conn *net.UDPConn, mtu int) {
 				// Read UDP packet from socket
 				n, addr, readErr := conn.ReadFrom(buffer)
 				if readErr != nil {
-					log.Println("Fail to read UDP: ", readErr)
+					s.logger.Error("Fail to read UDP",
+						"err", readErr,
+					)
 					continue
 				}
 
-				log.Printf("Received UDP from %s: \n", addr)
+				s.logger.Debug("Received UDP",
+					"addr", addr.String(),
+				)
 
 				// Unpack the UDP packet into a DNS message
 				var msg dns.Msg
 				if unpackErr := msg.Unpack(buffer[:n]); unpackErr != nil {
-					log.Println("Fail to unpack UDP: ", unpackErr)
+					s.logger.Error("Fail to unpack UDP",
+						"err", unpackErr,
+					)
 					continue
 				}
 
@@ -206,12 +214,16 @@ func (s *Server) Terminate() {
 	// Close the UDP connections
 	if s.udpConnIPv4 != nil {
 		if closeErr := s.udpConnIPv4.Close(); closeErr != nil {
-			log.Println("Fail to close UDP IPv4 connection: ", closeErr)
+			s.logger.Error("Fail to close UDP IPv4 connection",
+				"err", closeErr,
+			)
 		}
 	}
 	if s.udpConnIPv6 != nil {
 		if closeErr := s.udpConnIPv6.Close(); closeErr != nil {
-			log.Println("Fail to close UDP IPv6 connection: ", closeErr)
+			s.logger.Error("Fail to close UDP IPv6 connection",
+				"err", closeErr,
+			)
 		}
 	}
 }
@@ -235,7 +247,11 @@ func (s *Server) insideRequestHandler() {
 
 				// Get question from the message
 				question := reqEntry.msg.Question[0]
-				log.Printf("Question: %s\n", question.Name)
+
+				s.logger.Info("Received DNS request",
+					"question", question.String(),
+					"addr", reqEntry.addr.String(),
+				)
 
 				// Check if the domain is blocked
 				if s.blocked.Contains(question.Name) {
@@ -261,7 +277,7 @@ func (s *Server) insideRequestHandler() {
 				// TODO: new feature: support custom record for local network
 
 				// Resolve the request
-				resolver := NewResolver(s, reqEntry)
+				resolver := NewResolver(s, reqEntry, s.rootLogger)
 				resolver.resolve()
 			}
 		}
@@ -313,7 +329,9 @@ func (s *Server) sendResponse(addr net.Addr, resp *dns.Msg) {
 	// serialize the message
 	data, packErr := resp.Pack()
 	if packErr != nil {
-		log.Printf("Failed to pack DNS response: %s\n", packErr)
+		s.logger.Error("Fail to pack DNS response",
+			"err", packErr,
+		)
 		return
 	}
 
@@ -326,18 +344,27 @@ func (s *Server) sendResponse(addr net.Addr, resp *dns.Msg) {
 			conn = s.udpConnIPv6
 		}
 	} else {
-		log.Printf("Failed to cast address to UDP address: %s\n", addr)
+		s.logger.Error("Fail to cast address to UDP address",
+			"err", fmt.Errorf("invalid address type: %T", addr),
+		)
 		return
 	}
 
 	// send the message
 	n, writeErr := conn.WriteToUDP(data, addr.(*net.UDPAddr))
 	if writeErr != nil {
-		log.Printf("Failed to send DNS response: %s\n", writeErr)
+		s.logger.Error("Fail to send DNS response",
+			"err", writeErr,
+			"addr", addr.String(),
+		)
 		return
 	}
 	if n != len(data) {
-		log.Printf("Sent size %d didn't match message size %d\n", n, len(data))
+		s.logger.Error("Sent DNS response size doesn't match message size",
+			"expected", len(data),
+			"actual", n,
+			"addr", addr.String(),
+		)
 	}
 }
 

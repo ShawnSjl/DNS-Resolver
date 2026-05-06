@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
@@ -21,29 +21,36 @@ func main() {
 
 	// validate port
 	dnsPort, err := strconv.Atoi(*dnsPortFlag)
-	if err != nil {
+	if err != nil || dnsPort < 0 || dnsPort > 65535 {
 		flag.Usage()
-		fmt.Printf("Error: port number is not valid\n")
-		os.Exit(1)
+		log.Fatal("Port number must be a number, e.g. 53")
 	}
 	controllerPort, err := strconv.Atoi(*controllerPortFlag)
-	if err != nil {
+	if err != nil || controllerPort < 0 || controllerPort > 65535 {
 		flag.Usage()
-		fmt.Printf("Error: controller port number is not valid\n")
-		os.Exit(1)
+		log.Fatal("Port number must be a number, e.g. 7878")
 	}
 
 	// create root context
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	opts := &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}
+	handler := slog.NewTextHandler(os.Stdout, opts)
+	logger := slog.New(handler)
+
 	// create DNS server
-	dnsServer := dns.NewDNSServer(rootCtx)
+	dnsServer := dns.NewDNSServer(rootCtx, logger)
 	dnsServer.RunIPv4(uint16(dnsPort)) // run DNS server in IPv4
 	dnsServer.RunIPv6(uint16(dnsPort)) // run DNS server in IPv6
 
 	// TODO: handle message from controller interface
-	log.Printf("Controller port: %d", controllerPort)
+	logger.Info("DNS server is running",
+		"dnsPort", dnsPort,
+		"controllerPort", controllerPort,
+	)
 	select {
 	case <-rootCtx.Done(): // wait for interrupt signal
 	}

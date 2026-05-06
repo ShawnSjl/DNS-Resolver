@@ -65,4 +65,6 @@ func (s *Server) loadRootHints() {
 	for _, rr := range rootHintsAAAA {
 		s.cache.add(&rr, false)
 	}
+
+	s.logger.Info("Loaded root hints")
 }
