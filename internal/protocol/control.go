@@ -4,9 +4,26 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-
-	"github.com/miekg/dns"
 )
+
+type CommandType int
+
+const (
+	CommandBlock CommandType = iota
+	CommandUnblock
+	CommandListBlocks
+	CommandListRecords
+	CommandQuery
+	CommandMode
+	CommandStats
+	CommandClearCache
+	CommandHelp
+)
+
+type Cmd struct {
+	cmdType CommandType
+	strLen  int // length of the command string, 0 or more
+}
 
 type Command struct {
 	Name   string
@@ -44,44 +61,35 @@ func ParseCommand(line string) (Command, error) {
 			return Command{}, errors.New("usage: lr")
 		}
 		return Command{Name: "lr"}, nil
-	case "q":
-		if len(fields) != 3 {
-			return Command{}, errors.New("usage: q DOMAIN TYPE")
-		}
-		// Use dns's own type table.
-		qtype, ok := dns.StringToType[strings.ToUpper(fields[2])]
-		if !ok {
-			return Command{}, fmt.Errorf("unknown DNS type %q", fields[2])
-		}
-		return Command{Name: "q", Domain: fields[1], QType: qtype}, nil
-	case "mode":
-		// mode alone reads; mode VALUE updates.
-		if len(fields) == 1 {
-			return Command{Name: "mode"}, nil
-		}
-		if len(fields) != 2 {
-			return Command{}, errors.New("usage: mode [forward|iterative]")
-		}
-		mode := strings.ToLower(fields[1])
-		if mode != "forward" && mode != "iterative" {
-			return Command{}, fmt.Errorf("unsupported mode %q", fields[1])
-		}
-		return Command{Name: "mode", Mode: mode}, nil
-	case "stats":
-		if len(fields) != 1 {
-			return Command{}, errors.New("usage: stats")
-		}
-		return Command{Name: "stats"}, nil
+	//case "mode":
+	//	// mode alone reads; mode VALUE updates.
+	//	if len(fields) == 1 {
+	//		return Command{Name: "mode"}, nil
+	//	}
+	//	if len(fields) != 2 {
+	//		return Command{}, errors.New("usage: mode [forward|iterative]")
+	//	}
+	//	mode := strings.ToLower(fields[1])
+	//	if mode != "forward" && mode != "iterative" {
+	//		return Command{}, fmt.Errorf("unsupported mode %q", fields[1])
+	//	}
+	//	return Command{Name: "mode", Mode: mode}, nil
+	//case "stats":
+	//	if len(fields) != 1 {
+	//		return Command{}, errors.New("usage: stats")
+	//	}
+	//	return Command{Name: "stats"}, nil
+	// TODO: list cache
 	case "clearcache":
 		if len(fields) != 1 {
 			return Command{}, errors.New("usage: clearcache")
 		}
 		return Command{Name: "clearcache"}, nil
-	case "help":
-		if len(fields) != 1 {
-			return Command{}, errors.New("usage: help")
-		}
-		return Command{Name: "help"}, nil
+	//case "help": // TODO: controller side
+	//	if len(fields) != 1 {
+	//		return Command{}, errors.New("usage: help")
+	//	}
+	//	return Command{Name: "help"}, nil
 	default:
 		return Command{}, fmt.Errorf("unknown command %q", fields[0])
 	}
@@ -96,7 +104,7 @@ func Help() string {
 		"unblock DOMAIN",
 		"lb",
 		"lr",
-		"q DOMAIN TYPE",
+		//"q DOMAIN TYPE",
 		"mode",
 		"mode forward",
 		"mode iterative",

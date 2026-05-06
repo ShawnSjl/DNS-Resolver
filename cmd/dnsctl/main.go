@@ -27,6 +27,8 @@ func main() {
 	client := &controllerClient{}
 	_ = client.Connect(*defaultAddr)
 
+	// TODO: Parse all commands here
+
 	for {
 		// Ignore blank lines like a normal shell.
 		line, err := rl.Readline()
@@ -113,7 +115,7 @@ func (c *controllerClient) Send(line string) (string, error) {
 		c.connected = false
 		return "", err
 	}
-	defer conn.Close()
+	defer conn.Close() // TODO: do not close the connection, keep using it
 
 	reader := bufio.NewReader(conn)
 	if _, err := fmt.Fprintln(conn, line); err != nil {

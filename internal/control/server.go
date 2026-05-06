@@ -34,7 +34,8 @@ func Serve(ctx context.Context, ln net.Listener, runtime Runtime, clientTimeout 
 
 	go func() {
 		for {
-			conn, err := ln.Accept()
+			conn, err := ln.Accept() // TODO: accept one connection and hold it open, util controller disconnect,
+			// then accept new connection from the controller.
 			if err != nil {
 				select {
 				case <-ctx.Done():
@@ -86,6 +87,7 @@ func handleConn(ctx context.Context, conn net.Conn, runtime Runtime, clientTimeo
 }
 
 func execute(ctx context.Context, runtime Runtime, line string) string {
+	// TODO: do not parse the command here, just validate it and call the interface.
 	cmd, err := protocol.ParseCommand(line)
 	if err != nil {
 		return "ERR " + err.Error() + "\n"
