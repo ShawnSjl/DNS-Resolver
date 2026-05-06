@@ -45,6 +45,7 @@ type Zone struct {
 	name  string     // i.e. ".", "com.", "example.com."
 	mutex sync.Mutex // lock of nodes
 
+	// local cache with TTL countdown
 	ns       []dns.RR
 	glueA    []dns.RR
 	glueAAAA []dns.RR
@@ -79,6 +80,7 @@ func NewResolver(server *Server, entry Entry) *Resolver {
 
 	// Create the root zone
 	rootZone := resolver.createRootZone()
+	// no need to countdown root zone's TTL, it should never expire'
 	resolver.stack = append(resolver.stack, rootZone)
 
 	resolver.signalReady()
@@ -365,6 +367,7 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 	// Handle Authoritative RRs
 	for _, rr := range resp.Ns {
 		if rr.Header().Rrtype != dns.TypeNS {
+			// TODO:
 			log.Printf("Ignore non-NS record in Authoritative RRs: %d\n", rr.Header().Rrtype)
 			continue
 		}
@@ -375,6 +378,7 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 	// Handle Additional RRs
 	for _, rr := range resp.Extra {
 		if rr.Header().Rrtype == dns.TypeOPT {
+			// TODO:
 			log.Println("Ignore OPT record")
 			continue
 		}
@@ -415,6 +419,7 @@ func (r *Resolver) getZone(name string) *Zone {
 		glueAAAA:   []dns.RR{},
 		searchedNS: []string{},
 	}
+	zone.ttlCountdown(r.ctx)
 	r.stack = append(r.stack, zone)
 	return zone
 }
@@ -481,7 +486,8 @@ func (z *Zone) getRandomNS() (*dns.NS, error) {
 		switch ns := rr.(type) {
 		case *dns.NS:
 			if !slices.Contains(z.searchedNS, ns.Ns) {
-				return ns, nil
+				nsCopy := dns.Copy(ns) // use copy to avoid modifying the original RR
+				return nsCopy.(*dns.NS), nil
 			}
 		default:
 			return nil, fmt.Errorf("Non-NS record during random NS: %d", rr.Header().Rrtype)
@@ -498,19 +504,56 @@ func (z *Zone) getGlue(domain string, supportIPv6 bool) ([]dns.RR, error) {
 
 	for _, glue := range z.glueA {
 		if dns.Fqdn(glue.Header().Name) == dns.Fqdn(domain) {
-			result = append(result, glue)
+			glueCopy := dns.Copy(glue) // use copy to avoid modifying the original RR
+			result = append(result, glueCopy)
 		}
 	}
 
 	if supportIPv6 {
 		for _, glue := range z.glueAAAA {
 			if dns.Fqdn(glue.Header().Name) == dns.Fqdn(domain) {
-				result = append(result, glue)
+				glueCopy := dns.Copy(glue) // use copy to avoid modifying the original RR
+				result = append(result, glueCopy)
 			}
 		}
 	}
 
 	return result, nil
+}
+
+func (z *Zone) ttlCountdown(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(time.Second)
+
+		for {
+			select {
+			case <-ctx.Done():
+				ticker.Stop()
+				return
+
+			case <-ticker.C:
+				z.mutex.Lock()
+
+				z.ns = handleTTLCountdown(z.ns)
+				z.glueA = handleTTLCountdown(z.glueA)
+				z.glueAAAA = handleTTLCountdown(z.glueAAAA)
+
+				z.mutex.Unlock()
+			}
+		}
+	}()
+}
+
+func handleTTLCountdown(rrSet []dns.RR) []dns.RR {
+	n := 0
+	for _, rr := range rrSet {
+		rr.Header().Ttl--
+		if rr.Header().Ttl > 0 {
+			rrSet[n] = rr
+			n++
+		}
+	}
+	return rrSet[:n]
 }
 
 func (r *Resolver) signalReady() {
