@@ -19,22 +19,6 @@ const (
 	timeoutInterval = 1 * time.Second
 )
 
-var rootDNS = []string{
-	"a.root-servers.net.",
-	"b.root-servers.net.",
-	"c.root-servers.net.",
-	"d.root-servers.net.",
-	"e.root-servers.net.",
-	"f.root-servers.net.",
-	"g.root-servers.net.",
-	"h.root-servers.net.",
-	"i.root-servers.net.",
-	"j.root-servers.net.",
-	"k.root-servers.net.",
-	"l.root-servers.net.",
-	"m.root-servers.net.",
-}
-
 type Resolver struct {
 	ctx    context.Context
 	cancel context.CancelFunc
