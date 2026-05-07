@@ -24,7 +24,7 @@ const (
 
 	queueSize = 1024
 
-	queryInterval = 100 * time.Millisecond
+	queryInterval = 50 * time.Millisecond
 )
 
 type Server struct {
@@ -280,7 +280,6 @@ func (s *Server) insideRequestHandler() {
 				go func() {
 					resolver := NewResolver(s, question.Name, question.Qtype)
 					result, err := resolver.resolve()
-					resolver.terminate()
 					if err != nil {
 						s.logger.Error("Fail to resolve DNS request",
 							"err", err,

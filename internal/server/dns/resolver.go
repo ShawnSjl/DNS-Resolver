@@ -127,6 +127,8 @@ func (r *Resolver) createRootZone(logger *slog.Logger) *Zone {
 // ******************** Resolve Interface **********************
 
 func (r *Resolver) resolve() ([]dns.RR, error) {
+	defer r.cancel()
+
 ResolveLoop:
 	for {
 		select {
@@ -175,11 +177,45 @@ ResolveLoop:
 				return nil, fmt.Errorf("fail to get glue records of NS record: %e", glueErr)
 			}
 
-			// TODO: If there is no available glue record, query for it
+			// If there is no available glue record, query for it
 			if len(glues) == 0 {
-				r.logger.Info("No glue record available for NS record, query for it")
-				return nil, fmt.Errorf("not implemented yet")
+				// Try to get the glue record from global cache
+				if cachedGlue, ok := r.globalCache.get(ns.Ns, dns.TypeA, dns.ClassINET); ok {
+					glues = cachedGlue
+				}
+				if r.server.supportIPv6.Load() {
+					if cachedGlue, ok := r.globalCache.get(ns.Ns, dns.TypeAAAA, dns.ClassINET); ok {
+						glues = cachedGlue
+					}
+				}
+				if len(glues) != 0 {
+					goto hasGlue
+				}
+
+				r.logger.Info("No glue record available for NS record, query for it", "ns", ns.Ns)
+
+				// use sub query to get the glue record
+				subResolver := NewResolver(r.server, ns.Ns, dns.TypeA)
+				subResults, subErr := subResolver.resolve()
+				if subErr != nil {
+					return nil, fmt.Errorf("fail to do subquery for %s: %e", ns.Ns, subErr)
+				}
+
+				// If subquery get no answer, continue to the next NS record
+				if len(subResults) == 0 {
+					r.logger.Warn("Subquery for NS record get no answer, continue to the next NS record", "ns", ns.Ns)
+					r.signalReady()
+					continue ResolveLoop
+				}
+
+				// Store the subquery result to local cache and global cache
+				for _, glue := range glues {
+					currentZone.addGlue(glue, true)
+					r.globalCache.add(glue, true)
+				}
+				glues = subResults
 			}
+		hasGlue:
 
 			// Choose a glue record randomly and get its IP address
 			glue := glues[rand.IntN(len(glues))]
@@ -566,10 +602,6 @@ func (r *Resolver) signalReady() {
 	case r.readySignal <- true:
 	default:
 	}
-}
-
-func (r *Resolver) terminate() {
-	r.cancel()
 }
 
 // ******************** Helper Method **********************
