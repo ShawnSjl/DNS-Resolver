@@ -279,7 +279,7 @@ func (s *Server) insideRequestHandler() {
 				// Resolve the request
 				go func() {
 					resolver := NewResolver(s, question.Name, question.Qtype)
-					result, err := resolver.resolve()
+					result, err := resolver.resolve(1, make(map[string]bool))
 					if err != nil {
 						s.logger.Error("Fail to resolve DNS request",
 							"err", err,

@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	maxDepth        = 5
 	timeoutInterval = 1 * time.Second
 )
 
@@ -126,8 +127,16 @@ func (r *Resolver) createRootZone(logger *slog.Logger) *Zone {
 
 // ******************** Resolve Interface **********************
 
-func (r *Resolver) resolve() ([]dns.RR, error) {
+func (r *Resolver) resolve(depth int, seen map[string]bool) ([]dns.RR, error) {
 	defer r.cancel()
+
+	if depth > maxDepth {
+		return nil, fmt.Errorf("resolver query depth is too deep")
+	}
+	if seen[r.domain] {
+		return nil, fmt.Errorf("resolver query loop detected")
+	}
+	seen[r.domain] = true
 
 ResolveLoop:
 	for {
@@ -196,7 +205,7 @@ ResolveLoop:
 
 				// use sub query to get the glue record
 				subResolver := NewResolver(r.server, ns.Ns, dns.TypeA)
-				subResults, subErr := subResolver.resolve()
+				subResults, subErr := subResolver.resolve(depth+1, seen)
 				if subErr != nil {
 					return nil, fmt.Errorf("fail to do subquery for %s: %e", ns.Ns, subErr)
 				}
@@ -210,7 +219,7 @@ ResolveLoop:
 
 				// Store the subquery result to local cache and global cache
 				for _, glue := range glues {
-					currentZone.addGlue(glue, true)
+					currentZone.addGlue(glue)
 					r.globalCache.add(glue, true)
 				}
 				glues = subResults
@@ -388,7 +397,11 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 		if zone == nil {
 			continue
 		}
-		zone.addGlue(rr, true)
+		// Check if glue record is in bailiwick
+		if dns.IsSubDomain(zone.name, dns.Fqdn(rr.Header().Name)) {
+			r.globalCache.add(rr, true)
+		}
+		zone.addGlue(rr)
 	}
 	if getAnswer {
 		return nil // return nil if there is an answer
@@ -416,7 +429,11 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 		if zone == nil {
 			continue
 		}
-		zone.addGlue(rr, true)
+		// Check if glue record is in bailiwick
+		if dns.IsSubDomain(zone.name, dns.Fqdn(rr.Header().Name)) {
+			r.globalCache.add(rr, true)
+		}
+		zone.addGlue(rr)
 	}
 
 	//r.dump()
@@ -483,14 +500,9 @@ func (z *Zone) addNS(rr dns.RR) {
 	z.ns = append(z.ns, rr)
 }
 
-func (z *Zone) addGlue(rr dns.RR, trust bool) {
+func (z *Zone) addGlue(rr dns.RR) {
 	z.mutex.Lock()
 	defer z.mutex.Unlock()
-
-	if !trust {
-		// TODO: check if glue record is in bailiwick
-		z.logger.Debug("Check if glue record is in bailiwick, not implement yet")
-	}
 
 	switch rr.Header().Rrtype {
 	case dns.TypeA:
