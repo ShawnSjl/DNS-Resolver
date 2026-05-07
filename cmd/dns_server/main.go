@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/brown-cs1680-s26/final-jiale-xinran/internal/server/dns"
+	_interface "github.com/brown-cs1680-s26/final-jiale-xinran/internal/server/interface"
 )
 
 func main() {
@@ -61,11 +62,13 @@ func main() {
 	dnsServer.RunIPv4(uint16(dnsPort)) // run DNS server in IPv4
 	dnsServer.RunIPv6(uint16(dnsPort)) // run DNS server in IPv6
 
-	// TODO: handle message from controller interface
+	// handle message from controller interface
 	logger.Info("DNS server is running",
 		"dnsPort", dnsPort,
 		"controllerPort", controllerPort,
 	)
+	go _interface.Serve(rootCtx, logger, dnsServer, controllerPort)
+
 	select {
 	case <-rootCtx.Done(): // wait for interrupt signal
 	}
