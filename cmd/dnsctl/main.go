@@ -27,7 +27,9 @@ func main() {
 	client := &controllerClient{}
 	_ = client.Connect(*defaultAddr)
 
-	// TODO: Parse all commands here
+	parseCommand := func(line string) (controllerCommand, error) {
+		return parseControllerCommand(line, *defaultAddr)
+	}
 
 	for {
 		// Ignore blank lines like a normal shell.
@@ -43,61 +45,119 @@ func main() {
 			continue
 		}
 
-		fields := strings.Fields(line)
-		switch strings.ToLower(fields[0]) {
-		case "exit", "quit":
+		cmd, err := parseCommand(line)
+		if err != nil {
+			fmt.Println("ERR", err)
+			continue
+		}
+
+		switch cmd.kind {
+		case commandExit:
 			return
-		case "c":
-			// Use the default address if none is given.
-			addr := *defaultAddr
-			if len(fields) > 1 {
-				addr = fields[1]
-			}
-			if err := client.Connect(addr); err != nil {
+		case commandConnect:
+			if err := client.Connect(cmd.addr); err != nil {
 				fmt.Println("ERR", err)
 			} else {
-				fmt.Println("OK connected", addr)
+				fmt.Println("OK connected", cmd.addr)
 			}
-		case "d":
+		case commandDisconnect:
 			client.Close()
 			fmt.Println("OK disconnected")
-		case "help":
-			if client.Connected() {
-				printResponse(client.Send(line))
-			} else {
-				fmt.Println(localHelp())
-			}
-		default:
+		case commandHelp:
+			fmt.Println(localHelp())
+		case commandRemote:
 			if !client.Connected() {
 				if err := client.Connect(*defaultAddr); err != nil {
 					fmt.Println("ERR not connected; use c 127.0.0.1:7878")
 					continue
 				}
 			}
-			printResponse(client.Send(line))
+			printResponse(client.Send(cmd.line))
 		}
+	}
+}
+
+type commandKind int
+
+const (
+	commandRemote commandKind = iota
+	commandConnect
+	commandDisconnect
+	commandHelp
+	commandExit
+)
+
+type controllerCommand struct {
+	kind commandKind
+	addr string
+	line string
+}
+
+func parseControllerCommand(line string, defaultAddr string) (controllerCommand, error) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return controllerCommand{}, fmt.Errorf("empty command")
+	}
+
+	switch strings.ToLower(fields[0]) {
+	case "exit", "quit":
+		if len(fields) != 1 {
+			return controllerCommand{}, fmt.Errorf("usage: %s", fields[0])
+		}
+		return controllerCommand{kind: commandExit}, nil
+	case "c":
+		if len(fields) > 2 {
+			return controllerCommand{}, fmt.Errorf("usage: c [ADDR]")
+		}
+		addr := defaultAddr
+		if len(fields) == 2 {
+			addr = fields[1]
+		}
+		return controllerCommand{kind: commandConnect, addr: addr}, nil
+	case "d":
+		if len(fields) != 1 {
+			return controllerCommand{}, fmt.Errorf("usage: d")
+		}
+		return controllerCommand{kind: commandDisconnect}, nil
+	case "help":
+		if len(fields) != 1 {
+			return controllerCommand{}, fmt.Errorf("usage: help")
+		}
+		return controllerCommand{kind: commandHelp}, nil
+	default:
+		if _, err := protocol.ParseCommand(line); err != nil {
+			return controllerCommand{}, err
+		}
+		return controllerCommand{kind: commandRemote, line: line}, nil
 	}
 }
 
 type controllerClient struct {
 	addr      string
+	conn      net.Conn
+	reader    *bufio.Reader
 	connected bool
 }
 
 func (c *controllerClient) Connect(addr string) error {
-	// Check the address before saving it.
+	c.Close()
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return err
 	}
-	_ = conn.Close()
 	c.addr = addr
+	c.conn = conn
+	c.reader = bufio.NewReader(conn)
 	c.connected = true
 	return nil
 }
 
 func (c *controllerClient) Close() {
-	// No open socket here, just mark it disconnected.
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
+	c.conn = nil
+	c.reader = nil
 	c.connected = false
 }
 
@@ -106,27 +166,21 @@ func (c *controllerClient) Connected() bool {
 }
 
 func (c *controllerClient) Send(line string) (string, error) {
-	if !c.connected || c.addr == "" {
+	if !c.connected || c.conn == nil || c.reader == nil {
 		return "", fmt.Errorf("not connected")
 	}
-	// Match the server's one-command-per-connection style.
-	conn, err := net.Dial("tcp", c.addr)
-	if err != nil {
-		c.connected = false
-		return "", err
-	}
-	defer conn.Close() // TODO: do not close the connection, keep using it
 
-	reader := bufio.NewReader(conn)
-	if _, err := fmt.Fprintln(conn, line); err != nil {
+	if _, err := fmt.Fprintln(c.conn, line); err != nil {
+		c.Close()
 		return "", err
 	}
 
 	var lines []string
 	for {
 		// END means the response is complete.
-		resp, err := reader.ReadString('\n')
+		resp, err := c.reader.ReadString('\n')
 		if err != nil {
+			c.Close()
 			return "", err
 		}
 		resp = strings.TrimRight(resp, "\r\n")
@@ -152,6 +206,7 @@ func localHelp() string {
 		"c 127.0.0.1:7878",
 		"d",
 		protocol.Help(),
+		"help",
 		"exit",
 		"quit",
 	}, "\n")

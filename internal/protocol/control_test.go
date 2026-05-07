@@ -11,18 +11,14 @@ func TestParseBlockCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cmd.Name != "block" || cmd.Domain != "example.com" {
+	if cmd.Type != CommandBlock || cmd.Name != "block" || cmd.Domain != "example.com" {
 		t.Fatalf("unexpected command: %+v", cmd)
 	}
 }
 
-func TestParseModeCommand(t *testing.T) {
-	cmd, err := ParseCommand("mode iterative")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cmd.Name != "mode" || cmd.Mode != "iterative" {
-		t.Fatalf("unexpected command: %+v", cmd)
+func TestParseModeCommandDisabled(t *testing.T) {
+	if _, err := ParseCommand("mode iterative"); err == nil {
+		t.Fatal("mode should stay disabled until server support is ready")
 	}
 }
 
@@ -31,8 +27,20 @@ func TestParseQueryCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cmd.Name != "q" || cmd.Domain != "_sip._tcp.example.com" || cmd.QType != dns.TypeSRV {
+	if cmd.Type != CommandQuery || cmd.Name != "q" || cmd.Domain != "_sip._tcp.example.com" || cmd.QType != dns.TypeSRV {
 		t.Fatalf("unexpected command: %+v", cmd)
+	}
+}
+
+func TestParseStatsCommandDisabled(t *testing.T) {
+	if _, err := ParseCommand("stats"); err == nil {
+		t.Fatal("stats should stay disabled until server support is ready")
+	}
+}
+
+func TestParseHelpCommandDisabled(t *testing.T) {
+	if _, err := ParseCommand("help"); err == nil {
+		t.Fatal("help should stay on the controller side")
 	}
 }
 

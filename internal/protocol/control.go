@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/miekg/dns"
 )
 
 type CommandType int
@@ -26,10 +28,25 @@ type Cmd struct {
 }
 
 type Command struct {
+	Type   CommandType
 	Name   string
 	Domain string
 	QType  uint16
 	Mode   string
+}
+
+var commandSpecs = map[string]Cmd{
+	"b":          {cmdType: CommandBlock, strLen: 1},
+	"block":      {cmdType: CommandBlock, strLen: 1},
+	"ub":         {cmdType: CommandUnblock, strLen: 1},
+	"unblock":    {cmdType: CommandUnblock, strLen: 1},
+	"lb":         {cmdType: CommandListBlocks, strLen: 0},
+	"lr":         {cmdType: CommandListRecords, strLen: 0},
+	"q":          {cmdType: CommandQuery, strLen: 2},
+	"clearcache": {cmdType: CommandClearCache, strLen: 0},
+	// "mode": {cmdType: CommandMode, strLen: 0},
+	// "stats": {cmdType: CommandStats, strLen: 0},
+	// "help": {cmdType: CommandHelp, strLen: 0},
 }
 
 func ParseCommand(line string) (Command, error) {
@@ -39,59 +56,78 @@ func ParseCommand(line string) (Command, error) {
 		return Command{}, errors.New("empty command")
 	}
 
-	switch strings.ToLower(fields[0]) {
-	case "b", "block":
-		// Short aliases make dnsctl less annoying to type in.
-		if len(fields) != 2 {
-			return Command{}, errors.New("usage: block DOMAIN")
-		}
-		return Command{Name: "block", Domain: fields[1]}, nil
-	case "ub", "unblock":
-		if len(fields) != 2 {
-			return Command{}, errors.New("usage: unblock DOMAIN")
-		}
-		return Command{Name: "unblock", Domain: fields[1]}, nil
-	case "lb":
-		if len(fields) != 1 {
-			return Command{}, errors.New("usage: lb")
-		}
-		return Command{Name: "lb"}, nil
-	case "lr":
-		if len(fields) != 1 {
-			return Command{}, errors.New("usage: lr")
-		}
-		return Command{Name: "lr"}, nil
-	//case "mode":
-	//	// mode alone reads; mode VALUE updates.
-	//	if len(fields) == 1 {
-	//		return Command{Name: "mode"}, nil
-	//	}
-	//	if len(fields) != 2 {
-	//		return Command{}, errors.New("usage: mode [forward|iterative]")
-	//	}
-	//	mode := strings.ToLower(fields[1])
-	//	if mode != "forward" && mode != "iterative" {
-	//		return Command{}, fmt.Errorf("unsupported mode %q", fields[1])
-	//	}
-	//	return Command{Name: "mode", Mode: mode}, nil
-	//case "stats":
-	//	if len(fields) != 1 {
-	//		return Command{}, errors.New("usage: stats")
-	//	}
-	//	return Command{Name: "stats"}, nil
-	// TODO: list cache
-	case "clearcache":
-		if len(fields) != 1 {
-			return Command{}, errors.New("usage: clearcache")
-		}
-		return Command{Name: "clearcache"}, nil
-	//case "help": // TODO: controller side
-	//	if len(fields) != 1 {
-	//		return Command{}, errors.New("usage: help")
-	//	}
-	//	return Command{Name: "help"}, nil
-	default:
+	token := strings.ToLower(fields[0])
+	spec, ok := commandSpecs[token]
+	if !ok {
 		return Command{}, fmt.Errorf("unknown command %q", fields[0])
+	}
+	if len(fields)-1 != spec.strLen {
+		return Command{}, fmt.Errorf("usage: %s", usageFor(spec.cmdType))
+	}
+
+	cmd := Command{
+		Type: spec.cmdType,
+		Name: nameFor(spec.cmdType),
+	}
+
+	switch spec.cmdType {
+	case CommandBlock, CommandUnblock:
+		cmd.Domain = fields[1]
+	case CommandQuery:
+		cmd.Domain = fields[1]
+		qtype, ok := dns.StringToType[strings.ToUpper(fields[2])]
+		if !ok {
+			return Command{}, fmt.Errorf("unknown DNS type %q", fields[2])
+		}
+		cmd.QType = qtype
+	}
+
+	return cmd, nil
+}
+
+func nameFor(cmdType CommandType) string {
+	switch cmdType {
+	case CommandBlock:
+		return "block"
+	case CommandUnblock:
+		return "unblock"
+	case CommandListBlocks:
+		return "lb"
+	case CommandListRecords:
+		return "lr"
+	case CommandQuery:
+		return "q"
+	case CommandMode:
+		return "mode"
+	case CommandStats:
+		return "stats"
+	case CommandClearCache:
+		return "clearcache"
+	case CommandHelp:
+		return "help"
+	default:
+		return ""
+	}
+}
+
+func usageFor(cmdType CommandType) string {
+	switch cmdType {
+	case CommandBlock:
+		return "block DOMAIN"
+	case CommandUnblock:
+		return "unblock DOMAIN"
+	case CommandListBlocks:
+		return "lb"
+	case CommandListRecords:
+		return "lr"
+	case CommandQuery:
+		return "q DOMAIN TYPE"
+	case CommandClearCache:
+		return "clearcache"
+	case CommandHelp:
+		return "help"
+	default:
+		return nameFor(cmdType)
 	}
 }
 
@@ -104,12 +140,11 @@ func Help() string {
 		"unblock DOMAIN",
 		"lb",
 		"lr",
-		//"q DOMAIN TYPE",
-		"mode",
-		"mode forward",
-		"mode iterative",
-		"stats",
+		"q DOMAIN TYPE",
+		// "mode",
+		// "mode forward",
+		// "mode iterative",
+		// "stats",
 		"clearcache",
-		"help",
 	}, "\n")
 }
