@@ -27,10 +27,9 @@ type Resolver struct {
 	server      *Server
 	globalCache *RecordCache // cache for DNS records
 
-	// variables for the original query
-	entry    Entry // entry to store the original query request and address
-	goal     string
-	goalType uint16
+	domain  string
+	qType   uint16
+	answers []dns.RR
 
 	queriesCount atomic.Int32 // number of queries in progress
 	readySignal  chan bool    // signal to tell the resolver that all queries are finished
@@ -56,21 +55,21 @@ type Zone struct {
 
 // ******************** Initialization Interface **********************
 
-func NewResolver(server *Server, entry Entry, logger *slog.Logger) *Resolver {
+func NewResolver(server *Server, domain string, qType uint16) *Resolver {
 	ctx, cancel := context.WithCancel(server.ctx)
 
 	// Add the root zone to the stack
 	resolver := &Resolver{
 		ctx:    ctx,
 		cancel: cancel,
-		logger: logger.WithGroup("resolver").With("goal", entry.msg.Question[0].Name, "type", entry.msg.Question[0].Qtype),
+		logger: server.rootLogger.WithGroup("resolver").With("domain", domain, "qType", qType),
 
 		server:      server,
 		globalCache: server.cache,
 
-		entry:    entry,
-		goal:     entry.msg.Question[0].Name,
-		goalType: entry.msg.Question[0].Qtype,
+		domain:  domain,
+		qType:   qType,
+		answers: []dns.RR{},
 
 		queriesCount: atomic.Int32{},
 		readySignal:  make(chan bool, 1),
@@ -80,13 +79,12 @@ func NewResolver(server *Server, entry Entry, logger *slog.Logger) *Resolver {
 		stack:          []*Zone{},
 	}
 
-	// Create the root zone
-	rootZone := resolver.createRootZone(logger)
-	// no need to countdown root zone's TTL, it should never expire'
+	// Create the root zone, no need to countdown root zone's TTL, it should never expire'
+	rootZone := resolver.createRootZone(resolver.logger)
 	resolver.stack = append(resolver.stack, rootZone)
 
+	// start the resolver
 	resolver.signalReady()
-
 	return resolver
 }
 
@@ -128,104 +126,88 @@ func (r *Resolver) createRootZone(logger *slog.Logger) *Zone {
 
 // ******************** Resolve Interface **********************
 
-func (r *Resolver) resolve() {
-	go func() {
-	ResolveLoop:
-		for {
-			select {
-			case <-r.ctx.Done():
-				return
+func (r *Resolver) resolve() ([]dns.RR, error) {
+ResolveLoop:
+	for {
+		select {
+		case <-r.ctx.Done():
+			return nil, fmt.Errorf("resolver context is done")
 
-			case <-r.readySignal:
-				// Get current zone
-				currentZone := r.stack[r.currentZoneIdx]
-
-				// Get random unsearched NS record from current zone
-				ns, getErr := currentZone.getRandomNS()
-				if getErr != nil {
-					r.logger.Error("Fail to get random NS record", "err", getErr)
-					r.terminate()
-					continue ResolveLoop
-				}
-
-				// If there is no NS unsearched record in current zone, fallback to the previous zone
-				if ns == nil {
-					// If there is only one zone left, there is no need to fallback
-					if len(r.stack) == 1 || r.currentZoneIdx == 0 {
-						r.logger.Info("All root NS has been queried, and there is no answer")
-
-						// send failure response to the client
-						resp := dns.Msg{}
-						resp.SetReply(r.entry.msg)
-						resp.Rcode = dns.RcodeNameError
-						entry := Entry{
-							msg:  &resp,
-							addr: r.entry.addr,
-						}
-						r.server.insideSendQueue <- entry
-
-						// exit the resolver
-						r.terminate()
-						continue ResolveLoop
-					}
-
-					// Fallback to the previous zone
-					r.logger.Info("All root NS has been queried, fallback to the previous zone")
-					r.currentZoneIdx--
-					r.signalReady()
-					continue ResolveLoop
-				}
-
-				r.logger.Debug("Get random NS record",
-					"zone", currentZone.name,
-					"ns", ns.Ns,
-				)
-
-				// Get glue records of the NS record
-				glues, glueErr := currentZone.getGlue(ns.Ns, r.server.supportIPv6.Load())
-				if glueErr != nil {
-					r.logger.Error("Fail to get glue records of NS record", "err", glueErr)
-					r.terminate()
-					continue ResolveLoop
-				}
-
-				// TODO: If there is no available glue record, query for it
-				if len(glues) == 0 {
-					r.logger.Info("No glue record available for NS record, query for it")
-					r.logger.Error("Not implemented yet")
-					r.terminate()
-					continue ResolveLoop
-				}
-
-				// Choose a glue record randomly and get its IP address
-				glue := glues[rand.IntN(len(glues))]
-				var remoteIP string
-				switch rr := glue.(type) {
-				case *dns.A:
-					remoteIP = rr.A.String()
-				case *dns.AAAA:
-					remoteIP = rr.AAAA.String()
-				default:
-					r.logger.Error("Unsupported glue record type during query", "ns", ns.Ns)
-					r.terminate()
-					continue ResolveLoop
-				}
-
-				// Send the query to the chosen glue server
-				go func() {
-					sendErr := r.sendQuery(remoteIP)
-					if sendErr != nil {
-						r.logger.Error("Fail to send query", "err", sendErr)
-					} else {
-						currentZone.markSearchedNS(ns.Ns)
-					}
-				}()
+		case <-r.readySignal:
+			// Check if the resolver has the answer
+			if len(r.answers) > 0 {
+				return r.answers, nil
 			}
+
+			// Get current zone
+			currentZone := r.stack[r.currentZoneIdx]
+
+			// Get random unsearched NS record from current zone
+			ns, getErr := currentZone.getRandomNS()
+			if getErr != nil {
+				return nil, fmt.Errorf("fail to get random NS record: %e", getErr)
+			}
+
+			// If there is no NS unsearched record in current zone, fallback to the previous zone
+			if ns == nil {
+				// If there is only one zone left, there is no need to fallback
+				if len(r.stack) == 1 || r.currentZoneIdx == 0 {
+					r.logger.Info("All root NS has been queried, and there is no answer")
+					// return nil, nil to indicate that there is no answer
+					return nil, nil
+				}
+
+				// Fallback to the previous zone
+				r.logger.Info("All root NS has been queried, fallback to the previous zone")
+				r.currentZoneIdx--
+				r.signalReady()
+				continue ResolveLoop
+			}
+
+			r.logger.Debug("Get random NS record",
+				"zone", currentZone.name,
+				"ns", ns.Ns,
+			)
+
+			// Get glue records of the NS record
+			glues, glueErr := currentZone.getGlue(ns.Ns, r.server.supportIPv6.Load())
+			if glueErr != nil {
+				return nil, fmt.Errorf("fail to get glue records of NS record: %e", glueErr)
+			}
+
+			// TODO: If there is no available glue record, query for it
+			if len(glues) == 0 {
+				r.logger.Info("No glue record available for NS record, query for it")
+				return nil, fmt.Errorf("not implemented yet")
+			}
+
+			// Choose a glue record randomly and get its IP address
+			glue := glues[rand.IntN(len(glues))]
+			var remoteIP string
+			switch rr := glue.(type) {
+			case *dns.A:
+				remoteIP = rr.A.String()
+			case *dns.AAAA:
+				remoteIP = rr.AAAA.String()
+			default:
+				return nil, fmt.Errorf("unsupported glue record type during query: %d", rr.Header().Rrtype)
+			}
+
+			// Send the query to the chosen glue server
+			go func() {
+				sendErr := r.sendQuery(remoteIP)
+				if sendErr != nil {
+					r.logger.Error("Fail to send query", "err", sendErr)
+				} else {
+					currentZone.markSearchedNS(ns.Ns)
+				}
+			}()
 		}
-	}()
+	}
 }
 
 func (r *Resolver) sendQuery(remoteIP string) error {
+	// Manage the number of queries
 	r.queriesCount.Add(1)
 	defer func() {
 		r.queriesCount.Add(-1)
@@ -269,7 +251,7 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 	}
 
 	// Generate a new DNS query message
-	req := newDnsQueryMsg(r.goal, r.goalType)
+	req := newDnsQueryMsg(r.domain, r.qType)
 	currentTransactionID := req.MsgHdr.Id
 
 	// Pack the DNS query
@@ -354,26 +336,15 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 	)
 
 	// Handle the Answers in the response
+	var getAnswer bool
 	for _, rr := range resp.Answer {
-		// If this is the final answer
-		if rr.Header().Rrtype == r.goalType && rr.Header().Name == r.goal {
-			// return the answer to the client
-			answerResp := dns.Msg{}
-			answerResp.SetReply(r.entry.msg)
-			answerResp.Authoritative = true
-			answerResp.Answer = append(answerResp.Answer, rr)
-			entry := Entry{
-				msg:  &answerResp,
-				addr: r.entry.addr,
-			}
-			r.server.insideSendQueue <- entry
-
-			// Add answer to global cache
-			r.globalCache.add(rr, true)
-
-			r.logger.Info("Get answer during query")
-			r.terminate()
-			return nil
+		// If this is the final answer, add it to the local cache and global cache
+		if rr.Header().Rrtype == r.qType && rr.Header().Name == r.domain {
+			r.answers = append(r.answers, rr) // Add answer to local cache
+			r.globalCache.add(rr, true)       // Add answer to global cache
+			getAnswer = true
+			r.logger.Info("Get answer during query", "answer", rr.String())
+			continue
 		}
 
 		// Add answer to local cache of glue
@@ -382,6 +353,9 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 			continue
 		}
 		zone.addGlue(rr, true)
+	}
+	if getAnswer {
+		return nil // return nil if there is an answer
 	}
 
 	// Handle Authoritative RRs

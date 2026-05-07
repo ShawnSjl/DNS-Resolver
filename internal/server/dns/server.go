@@ -277,8 +277,36 @@ func (s *Server) insideRequestHandler() {
 				// TODO: new feature: support custom record for local network
 
 				// Resolve the request
-				resolver := NewResolver(s, reqEntry, s.rootLogger)
-				resolver.resolve()
+				go func() {
+					resolver := NewResolver(s, question.Name, question.Qtype)
+					result, err := resolver.resolve()
+					resolver.terminate()
+					if err != nil {
+						s.logger.Error("Fail to resolve DNS request",
+							"err", err,
+							"question", question.String(),
+							"addr", reqEntry.addr.String(),
+						)
+						return
+					}
+
+					// Form a response message
+					resp := dns.Msg{}
+					resp.SetReply(reqEntry.msg)
+					for _, rr := range result {
+						resp.Answer = append(resp.Answer, rr)
+					}
+
+					// If answer is empty, return NXDOMAIN
+					if len(resp.Answer) == 0 {
+						resp.Rcode = dns.RcodeNameError
+					}
+					entry := Entry{
+						msg:  &resp,
+						addr: reqEntry.addr,
+					}
+					s.insideSendQueue <- entry
+				}()
 			}
 		}
 	}()
