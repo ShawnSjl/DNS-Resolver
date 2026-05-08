@@ -36,14 +36,14 @@ type Command struct {
 }
 
 var commandSpecs = map[string]Cmd{
-	"b":          {cmdType: CommandBlock, strLen: 1},
-	"block":      {cmdType: CommandBlock, strLen: 1},
-	"ub":         {cmdType: CommandUnblock, strLen: 1},
-	"unblock":    {cmdType: CommandUnblock, strLen: 1},
-	"lb":         {cmdType: CommandListBlocks, strLen: 0},
-	"lr":         {cmdType: CommandListRecords, strLen: 0},
-	"q":          {cmdType: CommandQuery, strLen: 2},
-	"clearcache": {cmdType: CommandClearCache, strLen: 0},
+	"b":       {cmdType: CommandBlock, strLen: 1},
+	"block":   {cmdType: CommandBlock, strLen: 1},
+	"ub":      {cmdType: CommandUnblock, strLen: 1},
+	"unblock": {cmdType: CommandUnblock, strLen: 1},
+	"lb":      {cmdType: CommandListBlocks, strLen: 0},
+	"lr":      {cmdType: CommandListRecords, strLen: 0},
+	//"q":          {cmdType: CommandQuery, strLen: 2},
+	//"clearcache": {cmdType: CommandClearCache, strLen: 0},
 	// "mode": {cmdType: CommandMode, strLen: 0},
 	// "stats": {cmdType: CommandStats, strLen: 0},
 	// "help": {cmdType: CommandHelp, strLen: 0},
@@ -95,14 +95,14 @@ func nameFor(cmdType CommandType) string {
 		return "lb"
 	case CommandListRecords:
 		return "lr"
-	case CommandQuery:
-		return "q"
-	case CommandMode:
-		return "mode"
-	case CommandStats:
-		return "stats"
-	case CommandClearCache:
-		return "clearcache"
+	//case CommandQuery:
+	//	return "q"
+	//case CommandMode:
+	//	return "mode"
+	//case CommandStats:
+	//	return "stats"
+	//case CommandClearCache:
+	//	return "clearcache"
 	case CommandHelp:
 		return "help"
 	default:
@@ -120,10 +120,10 @@ func usageFor(cmdType CommandType) string {
 		return "lb"
 	case CommandListRecords:
 		return "lr"
-	case CommandQuery:
-		return "q DOMAIN TYPE"
-	case CommandClearCache:
-		return "clearcache"
+	//case CommandQuery:
+	//	return "q DOMAIN TYPE"
+	//case CommandClearCache:
+	//	return "clearcache"
 	case CommandHelp:
 		return "help"
 	default:
@@ -140,11 +140,11 @@ func Help() string {
 		"unblock DOMAIN",
 		"lb",
 		"lr",
-		"q DOMAIN TYPE",
+		//"q DOMAIN TYPE",
 		// "mode",
 		// "mode forward",
 		// "mode iterative",
 		// "stats",
-		"clearcache",
+		//"clearcache",
 	}, "\n")
 }
