@@ -1,5 +1,7 @@
 # Final Project Report: Local DNS Resolver
 
+Demo video (Brown Google Drive): https://drive.google.com/file/d/15QN_bdK29NorGZL5GptUKCAm3ITlyaFb/view?usp=sharing
+
 ## 1. Introduction
 
 For final project, we implemented a local DNS resolver and server in Go. The completed system can run as a local UDP DNS server and can be queried with standard tools such as `dig` and `nslookup`. It performs iterative resolution from built-in root hints, stores resolved records in an in-memory TTL cache, supports runtime domain blocking, and includes a lightweight controller client for inspecting and modifying server state while it is running. The implementation is intended as a practical local resolver and demonstration system rather than a production-grade replacement for a full DNS resolver.
