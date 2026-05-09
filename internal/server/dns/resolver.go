@@ -392,6 +392,30 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 			continue
 		}
 
+		// If this is a CNAME record, do subquery to get the answer
+		if cname, ok := rr.(*dns.CNAME); ok && rr.Header().Name == r.domain {
+			// FIXME: add NSs to speed up the query
+			subResolver := NewResolver(r.server, cname.Target, r.qType)
+			subResults, subErr := subResolver.resolve(1, make(map[string]bool))
+			if subErr != nil {
+				return fmt.Errorf("fail to do subquery for CNAME %s: %e", cname.Target, subErr)
+			}
+
+			// If subquery get no answer, return error
+			if len(subResults) == 0 {
+				return fmt.Errorf("subquery for CNAME %s record get no answer, exit", cname.Target)
+			}
+
+			// Collect answers
+			r.answers = append(r.answers, rr)
+			for _, subResult := range subResults {
+				r.answers = append(r.answers, subResult)
+				r.globalCache.add(subResult, true)
+				getAnswer = true
+				r.logger.Info("Get answer during query", "answer", subResult.String())
+			}
+		}
+
 		// Add answer to local cache of glue
 		zone := r.findZone(rr.Header().Name)
 		if zone == nil {
