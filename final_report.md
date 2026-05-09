@@ -128,7 +128,15 @@ The controller made the project feel more complete. It gave us a way to interact
 
 ## 4. AI Tools Experience
 
-We used AI tools mainly to help us learn more about the DNS protocol and Go during the project. However, we still followed an old-school programming style: we wrote the code ourselves, tested it ourselves, and made sure we understood each part of the implementation. We did not directly copy and paste AI-generated code into the project.
+We used AI tools mainly to help us learn more about the DNS protocol and Go during the project. 
+The most challenging part of the project was understanding how the DNS resolver works.
+DNS resolver is such a big topic that search engines are not helpful. There are so many 
+websites trying to teach you what DNS resolver is, but they are never going in depth.
+We have to admit that AI tools are much more helpful in this case. It can quickly answer questions that are hard to 
+find answers on the internet.
+
+But we can be proud to say that we still followed an old-school programming style: we wrote the code ourselves, 
+tested it ourselves, and made sure we understood each part of the implementation. We did not directly copy and paste AI-generated code into the project.
 
 ## 5. Conclusions and Future Work
 
