@@ -130,6 +130,11 @@ func (r *Resolver) createRootZone(logger *slog.Logger) *Zone {
 func (r *Resolver) resolve(depth int, seen map[string]bool) ([]dns.RR, error) {
 	defer r.cancel()
 
+	resolverStarted := time.Now()
+	defer func() {
+		r.logger.Debug("resolver duration", "duration", time.Since(resolverStarted), "domain", r.domain)
+	}()
+
 	if depth > maxDepth {
 		return nil, fmt.Errorf("resolver query depth is too deep")
 	}
@@ -145,6 +150,9 @@ ResolveLoop:
 			return nil, fmt.Errorf("resolver context is done")
 
 		case <-r.readySignal:
+			r.logger.Debug("resolver phase", "phase", "ready", "duration", time.Since(resolverStarted))
+
+			t0 := time.Now()
 			// Check global cache
 			if rrSet, ok := r.globalCache.get(r.domain, r.qType, dns.ClassINET); ok {
 				return rrSet, nil
@@ -164,6 +172,7 @@ ResolveLoop:
 				}
 				return result, nil
 			}
+			r.logger.Debug("resolver phase", "phase", "check_cache", "duration", time.Since(t0))
 
 			// Check if the resolver has the answer
 			if len(r.answers) > 0 {
@@ -173,6 +182,7 @@ ResolveLoop:
 			// Get current zone
 			currentZone := r.stack[r.currentZoneIdx]
 
+			t1 := time.Now()
 			// Get random unsearched NS record from current zone
 			ns, getErr := currentZone.getRandomNS()
 			if getErr != nil {
@@ -194,12 +204,14 @@ ResolveLoop:
 				r.signalReady()
 				continue ResolveLoop
 			}
+			r.logger.Debug("resolver phase", "phase", "get_random_ns", "duration", time.Since(t1))
 
 			r.logger.Debug("Get random NS record",
 				"zone", currentZone.name,
 				"ns", ns.Ns,
 			)
 
+			t2 := time.Now()
 			// Get glue records of the NS record
 			glues, glueErr := currentZone.getGlue(ns.Ns, r.server.supportIPv6.Load())
 			if glueErr != nil {
@@ -257,6 +269,7 @@ ResolveLoop:
 			default:
 				return nil, fmt.Errorf("unsupported glue record type during query: %d", rr.Header().Rrtype)
 			}
+			r.logger.Debug("resolver phase", "phase", "get_glue", "duration", time.Since(t2))
 
 			// Send the query to the chosen glue server
 			go func() {
@@ -272,6 +285,11 @@ ResolveLoop:
 }
 
 func (r *Resolver) sendQuery(remoteIP string) error {
+	queryStarted := time.Now()
+	defer func() {
+		r.logger.Debug("resolver query duration", "duration", time.Since(queryStarted), "domain", r.domain)
+	}()
+
 	// Manage the number of queries
 	r.queriesCount.Add(1)
 	defer func() {
@@ -289,6 +307,7 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 		return fmt.Errorf("fail to resolve UDP address %s: %e", addrStr, resolveErr)
 	}
 
+	t0 := time.Now()
 	// Wait for the query signal
 	select {
 	case <-r.ctx.Done():
@@ -296,6 +315,7 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 	case <-r.server.querySignal:
 		r.server.resetTimer()
 	}
+	r.logger.Debug("resolver phase", "phase", "wait_timer", "duration", time.Since(t0))
 
 	// Create a UDP connection
 	conn, connErr := net.DialUDP("udp", nil, remoteAddr)
@@ -325,6 +345,7 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 		return fmt.Errorf("fail to pack DNS query: %e", packErr)
 	}
 
+	t1 := time.Now()
 	// Send the DNS query
 	if _, sendErr := conn.Write(payload); sendErr != nil {
 		return fmt.Errorf("fail to send DNS query: %e", sendErr)
@@ -366,6 +387,7 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 		nByte = n
 		break
 	}
+	r.logger.Debug("resolver phase", "phase", "get_response", "duration", time.Since(t1), "domain", r.domain)
 
 	// Unpack the DNS response
 	var resp dns.Msg
@@ -439,8 +461,8 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 	for _, rr := range resp.Ns {
 		if rr.Header().Rrtype != dns.TypeNS {
 			// TODO: new feature: resolver not support DNSSEC yet
-			r.logger.Warn("Resolver not support DNSSEC yet, ignore non-NS record in Authoritative RRs", "rr-type",
-				rr.Header().Rrtype)
+			//r.logger.Warn("Resolver not support DNSSEC yet, ignore non-NS record in Authoritative RRs", "rr-type",
+			//	rr.Header().Rrtype)
 			continue
 		}
 		zone := r.getZone(rr.Header().Name)
@@ -450,7 +472,7 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 	// Handle Additional RRs
 	for _, rr := range resp.Extra {
 		if rr.Header().Rrtype == dns.TypeOPT {
-			r.logger.Info("Ignore OPT record")
+			//r.logger.Info("Ignore OPT record")
 			continue
 		}
 		zone := r.findZone(rr.Header().Name)

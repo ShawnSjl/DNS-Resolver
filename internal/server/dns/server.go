@@ -24,7 +24,7 @@ const (
 
 	queueSize = 1024
 
-	queryInterval = 50 * time.Millisecond
+	queryInterval = 10 * time.Millisecond
 )
 
 type Server struct {
