@@ -145,6 +145,26 @@ ResolveLoop:
 			return nil, fmt.Errorf("resolver context is done")
 
 		case <-r.readySignal:
+			// Check global cache
+			if rrSet, ok := r.globalCache.get(r.domain, r.qType, dns.ClassINET); ok {
+				return rrSet, nil
+			}
+
+			// Check if global cache has CNAME record, do subquery to get the answer
+			if rrSet, ok := r.globalCache.get(r.domain, dns.TypeCNAME, dns.ClassINET); ok {
+				var result []dns.RR
+				for _, rr := range rrSet {
+					subResolver := NewResolver(r.server, rr.(*dns.CNAME).Target, r.qType)
+					ResolveResults, subErr := subResolver.resolve(depth+1, seen)
+					if subErr != nil {
+						return nil, fmt.Errorf("fail to do subquery for %s: %e", rr.(*dns.CNAME).Target, subErr)
+					}
+					result = append(result, rr)                // add CNAME record to result
+					result = append(result, ResolveResults...) // add subquery result to result
+				}
+				return result, nil
+			}
+
 			// Check if the resolver has the answer
 			if len(r.answers) > 0 {
 				return r.answers, nil
@@ -394,26 +414,10 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 
 		// If this is a CNAME record, do subquery to get the answer
 		if cname, ok := rr.(*dns.CNAME); ok && rr.Header().Name == r.domain {
-			// FIXME: add NSs to speed up the query
-			subResolver := NewResolver(r.server, cname.Target, r.qType)
-			subResults, subErr := subResolver.resolve(1, make(map[string]bool))
-			if subErr != nil {
-				return fmt.Errorf("fail to do subquery for CNAME %s: %e", cname.Target, subErr)
-			}
-
-			// If subquery get no answer, return error
-			if len(subResults) == 0 {
-				return fmt.Errorf("subquery for CNAME %s record get no answer, exit", cname.Target)
-			}
-
-			// Collect answers
-			r.answers = append(r.answers, rr)
-			for _, subResult := range subResults {
-				r.answers = append(r.answers, subResult)
-				r.globalCache.add(subResult, true)
-				getAnswer = true
-				r.logger.Info("Get answer during query", "answer", subResult.String())
-			}
+			r.logger.Info("Get CNAME record during query", "cname", cname.Target)
+			getAnswer = true
+			r.globalCache.add(rr, true)
+			continue
 		}
 
 		// Add answer to local cache of glue

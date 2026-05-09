@@ -259,21 +259,6 @@ func (s *Server) insideRequestHandler() {
 					continue
 				}
 
-				// Check if the cache has the record of the domain
-				if rrSet, ok := s.cache.get(question.Name, question.Qtype, question.Qclass); ok {
-					resp := dns.Msg{}
-					resp.SetReply(reqEntry.msg)
-					for _, rr := range rrSet {
-						resp.Answer = append(resp.Answer, rr)
-					}
-					entry := Entry{
-						msg:  &resp,
-						addr: reqEntry.addr,
-					}
-					s.insideSendQueue <- entry
-					continue
-				}
-
 				// TODO: new feature: support custom record for local network
 
 				// Resolve the request
