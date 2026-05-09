@@ -158,6 +158,7 @@ func (c *RecordCache) get(domain string, qType uint16, qClass uint16) ([]dns.RR,
 		rrs := make([]dns.RR, 0, len(rrSet.rrs))
 		for _, rr := range rrSet.rrs {
 			r := dns.Copy(rr)
+			r.Header().Ttl = min(r.Header().Ttl, MaxTTL)
 			rrs = append(rrs, r)
 		}
 		slog.Debug("Cache hit", "domain", domain, "qType", qType, "rrs", rrs)
