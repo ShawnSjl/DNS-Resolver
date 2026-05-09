@@ -136,4 +136,21 @@ This project made DNS much less mysterious for us. We now have a better understa
 
 The project was satisfying because it turned a protocol we use every day into something we could run and inspect locally. Seeing `dig` and `nslookup` talk to our own server was the best part of the project, and the blocklist/controller demo made the server feel interactive.
 
-If we continued working on the project, the next steps would follow the future features already noted in the code. One improvement would be DNSSEC support, so the resolver could handle DNSSEC-related records instead of ignoring them. Another improvement would be custom local-network records, so the server could answer selected internal names directly before falling back to iterative resolution.
+If we continued working on the project, we have a clear roadmap to complete our DNS servers:
+1. Implement DNSSEC support: right now our resolver does not support processing the DNSSEC-related records. In the future, 
+   we plan to extend our server's feature to make it able to validate DNSSEC-signed records.
+2. Implement custom local-network records: we already have a way to store records in the cache, 
+   and we want to extend our server's feature to make it able to answer local-network records directly.
+   For example, we could direct domain names like `game-server.local` to a specific IP address in the local network.
+3. Support for automatic root hints: in the current implementation, we hard-code the root hints into the server. In 
+   the future, we plan to make the server automatically fetch the root hints when it starts up.
+4. Add weight to the cache: during the performance test, we found that some root DNS servers are slow to respond. In 
+   the future, we’ll plant to add a weight to the cache to make the server prioritize faster root DNS servers.
+5. Optimize the timer of controlling sending rate: in the current implementation, the server sends a DNS query to the 
+   outside every 10 milliseconds to prevent our resolver from being blocked by the remote DNS server. But it does 
+   not identify different ip addresses. This approach works well in the single query test, but it is not efficient 
+   in the real scenario. In the future, we will refine the timer to identify different ip addresses instead of using 
+   one timer to limit all remote ip addresses.
+6. Support configuration file: we already have a way to configure the server through command line flags and our 
+   controller program. In the future, we plan to add a configuration file to make it easier to configure the server. 
+   Such as presets for blocked domains, root hints, and so on.
