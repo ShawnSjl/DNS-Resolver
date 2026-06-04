@@ -8,7 +8,7 @@ import (
 	"net"
 	"strings"
 
-	"github.com/brown-cs1680-s26/final-jiale-xinran/internal/protocol"
+	"github.com/ShawnSjl/DNS-Resolver/internal/protocol"
 	"github.com/chzyer/readline"
 )
 

@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"syscall"
 
-	"github.com/brown-cs1680-s26/final-jiale-xinran/internal/server/dns"
-	_interface "github.com/brown-cs1680-s26/final-jiale-xinran/internal/server/interface"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/dns"
+	_interface "github.com/ShawnSjl/DNS-Resolver/internal/server/interface"
 )
 
 func main() {

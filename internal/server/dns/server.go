@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/brown-cs1680-s26/final-jiale-xinran/internal/server/blocklist"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/blocklist"
 	"github.com/miekg/dns"
 )
 

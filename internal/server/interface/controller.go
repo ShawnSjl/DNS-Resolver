@@ -9,8 +9,8 @@ import (
 	"net"
 	"strings"
 
-	"github.com/brown-cs1680-s26/final-jiale-xinran/internal/protocol"
-	"github.com/brown-cs1680-s26/final-jiale-xinran/internal/server/dns"
+	"github.com/ShawnSjl/DNS-Resolver/internal/protocol"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/dns"
 )
 
 func Serve(ctx context.Context, logger *slog.Logger, server *dns.Server, port int) {
