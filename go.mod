@@ -1,4 +1,4 @@
-module github.com/brown-cs1680-s26/final-jiale-xinran
+module github.com/ShawnSjl/DNS-Resolver
 
 go 1.25.5
 
