@@ -4,77 +4,46 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"io"
+	"log"
 	"net"
+	"os"
 	"strings"
 
+	"github.com/ShawnSjl/DNS-Resolver/internal/cli"
 	"github.com/ShawnSjl/DNS-Resolver/internal/protocol"
-	"github.com/chzyer/readline"
 )
 
 func main() {
-	defaultAddr := flag.String("addr", "127.0.0.1:7878", "control server address")
+	// Setup flags
+	addrFlag := flag.String("addr", "127.0.0.1", "address of the DNS resolver")
+	portFlag := flag.Int("port", 7878, "port of the DNS resolver")
 	flag.Parse()
 
-	// readline just makes the local prompt nicer.
-	rl, err := readline.New("dnsctl> ")
+	// validate port
+	port := *portFlag
+	if port < 0 || port > 65535 {
+		flag.Usage()
+		log.Fatal("Invalid port number")
+	}
+
+	// Resolve address
+	addr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d", *addrFlag, port))
 	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	defer rl.Close()
-
-	client := &controllerClient{}
-	_ = client.Connect(*defaultAddr)
-
-	parseCommand := func(line string) (controllerCommand, error) {
-		return parseControllerCommand(line, *defaultAddr)
+		log.Fatal("Fail to resolve address: ", err)
 	}
 
-	for {
-		// Ignore blank lines like a normal shell.
-		line, err := rl.Readline()
-		if err == readline.ErrInterrupt {
-			continue
-		}
-		if err == io.EOF {
-			return
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		cmd, err := parseCommand(line)
-		if err != nil {
-			fmt.Println("ERR", err)
-			continue
-		}
-
-		switch cmd.kind {
-		case commandExit:
-			return
-		case commandConnect:
-			if err := client.Connect(cmd.addr); err != nil {
-				fmt.Println("ERR", err)
-			} else {
-				fmt.Println("OK connected", cmd.addr)
-			}
-		case commandDisconnect:
-			client.Close()
-			fmt.Println("OK disconnected")
-		case commandHelp:
-			fmt.Println(localHelp())
-		case commandRemote:
-			if !client.Connected() {
-				if err := client.Connect(*defaultAddr); err != nil {
-					fmt.Println("ERR not connected; use c 127.0.0.1:7878")
-					continue
-				}
-			}
-			printResponse(client.Send(cmd.line))
-		}
+	// Connect to the DNS resolver
+	conn, err := net.DialTCP("tcp", nil, addr)
+	if err != nil {
+		log.Fatal("Fail to dial address: ", err)
 	}
+	defer func(conn *net.TCPConn) {
+		_ = conn.Close()
+	}(conn)
+
+	// Start REPL
+	cli.REPL()
+	os.Exit(0)
 }
 
 type commandKind int
