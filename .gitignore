@@ -7,6 +7,5 @@
 # GoLand
 .idea
 
-/dns_server
-/dns_controller
-/dnsctl
+/dnrd
+/dnr
