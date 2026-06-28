@@ -39,6 +39,6 @@ func main() {
 	}(conn)
 
 	// Start REPL
-	cli.REPL()
+	cli.REPL(conn)
 	os.Exit(0)
 }

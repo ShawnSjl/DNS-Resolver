@@ -5,13 +5,15 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"strings"
 
+	"github.com/ShawnSjl/DNS-Resolver/internal/protocol"
 	"github.com/chzyer/readline"
 	"github.com/spf13/cobra"
 )
 
-func REPL() {
+func REPL(conn *net.TCPConn) {
 	// Create a new readline instance.
 	repl := replInitialize()
 	defer func(repl *readline.Instance) {
@@ -20,7 +22,7 @@ func REPL() {
 		}
 	}(repl)
 
-	rootCmd := commandInitialize()
+	rootCmd := commandInitialize(conn)
 
 	for {
 		// Get the line from the readline instance.
@@ -59,7 +61,7 @@ func REPL() {
 func replInitialize() *readline.Instance {
 	l, err := readline.NewEx(&readline.Config{
 		Prompt:            "> ",
-		HistoryFile:       "/tmp/dnsctl.history",
+		HistoryFile:       "/tmp/dnr.history",
 		InterruptPrompt:   "^C",
 		HistorySearchFold: true,
 		EOFPrompt:         "exit",
@@ -86,9 +88,9 @@ func replGetLine(repl *readline.Instance) (string, bool) {
 
 // ******************** Command **********************
 
-func commandInitialize() *cobra.Command {
+func commandInitialize(conn *net.TCPConn) *cobra.Command {
 	rootCmd := &cobra.Command{
-		Use: "dnsctl",
+		Use: "dnr",
 	}
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
 
@@ -105,7 +107,14 @@ func commandInitialize() *cobra.Command {
 		Short: "Add domain to blocklist",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("blocklist add called with ", args)
+			data := []byte(args[0])
+			msg := protocol.Message{
+				MsgType: protocol.MsgBlockAdd,
+				Data:    data,
+			}
+			if err := sendAndReceive(conn, msg); err != nil {
+				return err
+			}
 			return nil
 		},
 	}
@@ -116,7 +125,14 @@ func commandInitialize() *cobra.Command {
 		Short: "Remove domain from blocklist",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("blocklist remove called with ", args)
+			data := []byte(args[0])
+			msg := protocol.Message{
+				MsgType: protocol.MsgBlockRemove,
+				Data:    data,
+			}
+			if err := sendAndReceive(conn, msg); err != nil {
+				return err
+			}
 			return nil
 		},
 	}
@@ -127,7 +143,13 @@ func commandInitialize() *cobra.Command {
 		Short: "List all domains in blocklist",
 		Args:  cobra.ExactArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("blocklist list called with ", args)
+			msg := protocol.Message{
+				MsgType: protocol.MsgBlockList,
+				Data:    make([]byte, 0),
+			}
+			if err := sendAndReceive(conn, msg); err != nil {
+				return err
+			}
 			return nil
 		},
 	}
@@ -146,11 +168,41 @@ func commandInitialize() *cobra.Command {
 		Short: "List all cached DNS records",
 		Args:  cobra.ExactArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("cache list called with ", args)
+			msg := protocol.Message{
+				MsgType: protocol.MsgCacheList,
+				Data:    make([]byte, 0),
+			}
+			if err := sendAndReceive(conn, msg); err != nil {
+				return err
+			}
 			return nil
 		},
 	}
 	cacheCmd.AddCommand(cacheListCmd)
 
 	return rootCmd
+}
+
+func sendAndReceive(conn *net.TCPConn, msg protocol.Message) error {
+	// Send message through connection
+	if sendErr := protocol.Send(conn, &msg); sendErr != nil {
+		return sendErr
+	}
+
+	// Receive response from connection
+	reply, err := protocol.Receive(conn)
+	if err != nil {
+		return err
+	}
+
+	// Handle response
+	switch reply.MsgType {
+	case protocol.MsgError:
+		return fmt.Errorf("error: %s", string(reply.Data))
+	case protocol.MsgAck:
+		fmt.Println(string(reply.Data))
+		return nil
+	default:
+		return fmt.Errorf("unexpected response type: %d", reply.MsgType)
+	}
 }

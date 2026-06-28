@@ -1,7 +1,6 @@
 package _interface
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"log"
@@ -49,76 +48,65 @@ func Serve(ctx context.Context, logger *slog.Logger, server *dns.Server, port in
 		}
 
 		// handle the connection and return true if the context is canceled
-		if exit := handleConn(ctx, logger, server, conn); exit {
+		go func() {
+			handleConn(ctx, logger, server, conn)
+		}()
+	}
+}
+
+func handleConn(ctx context.Context, logger *slog.Logger, server *dns.Server, conn *net.TCPConn) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Receive a request from controller
+		req, err := protocol.Receive(conn)
+
+		// Handle error of receiving
+		if err != nil {
+			// Send error response
+			payload := []byte(strings.TrimSpace(err.Error()))
+			resp := protocol.Message{
+				MsgType: protocol.MsgError,
+				Data:    payload,
+			}
+			if sendErr := protocol.Send(conn, &resp); sendErr != nil {
+				logger.Error("Fail to send error response", "err", sendErr)
+			}
+			return
+		}
+
+		// Execute the request
+		respType, respData := execute(server, req)
+		respPayload := []byte(respData)
+		resp := protocol.Message{
+			MsgType: respType,
+			Data:    respPayload,
+		}
+		if sendErr := protocol.Send(conn, &resp); sendErr != nil {
+			logger.Error("Fail to send response", "err", sendErr)
 			return
 		}
 	}
 }
 
-func handleConn(ctx context.Context, _ *slog.Logger, server *dns.Server, conn net.Conn) bool {
-	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return true
-		default:
-		}
-
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return false
-		}
-		line = strings.TrimSpace(line)
-
-		cmd, err := protocol.ParseCommand(line)
-		response := ""
-		if err != nil {
-			response = "ERR " + err.Error() + "\n"
-		} else {
-			response = execute(server, cmd)
-		}
-
-		// END tells clients when to stop reading.
-		if _, err := writer.WriteString(response); err != nil {
-			return false
-		}
-		if !strings.HasSuffix(response, "\n") {
-			if _, err := writer.WriteString("\n"); err != nil {
-				return false
-			}
-		}
-		if _, err := writer.WriteString("END\n"); err != nil {
-			return false
-		}
-		if err := writer.Flush(); err != nil {
-			return false
-		}
-	}
-}
-
-func execute(server *dns.Server, cmd protocol.Command) string {
+func execute(server *dns.Server, req *protocol.Message) (protocol.MessageType, string) {
 	// Validate first, then call into the server.
-	switch cmd.Type {
-	case protocol.CommandBlock:
-		server.Block(cmd.Domain)
-		return "OK blocked " + cmd.Domain + "\n"
-	case protocol.CommandUnblock:
-		server.Unblock(cmd.Domain)
-		return "OK unblocked " + cmd.Domain + "\n"
-	case protocol.CommandListBlocks:
-		return "OK " + server.ListBlocked() + "\n"
-	case protocol.CommandListRecords:
-		return "OK " + server.ListCache() + "\n"
+	switch req.MsgType {
+	case protocol.MsgBlockAdd:
+		server.Block(string(req.Data))
+		return protocol.MsgAck, "OK"
+	case protocol.MsgBlockRemove:
+		server.Unblock(string(req.Data))
+		return protocol.MsgAck, "OK"
+	case protocol.MsgBlockList:
+		return protocol.MsgAck, server.ListBlocked()
+	case protocol.MsgCacheList:
+		return protocol.MsgAck, server.ListCache()
 	default:
-		return fmt.Sprintf("ERR unsupported command %q\n", cmd.Name)
+		return protocol.MsgError, "unexpected request type " + string(req.MsgType)
 	}
-}
-
-func listOrEmpty(lines []string, empty string) string {
-	if len(lines) == 0 {
-		return empty + "\n"
-	}
-	return strings.Join(lines, "\n") + "\n"
 }
