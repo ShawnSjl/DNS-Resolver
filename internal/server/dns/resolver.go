@@ -307,13 +307,11 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 		return fmt.Errorf("fail to resolve UDP address %s: %e", addrStr, resolveErr)
 	}
 
-	t0 := time.Now()
 	// Wait for the query signal
-	select {
-	case <-r.ctx.Done():
+	t0 := time.Now()
+	r.server.throttle.Wait(remoteIP)
+	if r.ctx.Err() != nil {
 		return fmt.Errorf("resolver context is done")
-	case <-r.server.querySignal:
-		r.server.resetTimer()
 	}
 	r.logger.Debug("resolver phase", "phase", "wait_timer", "duration", time.Since(t0))
 

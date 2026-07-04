@@ -8,9 +8,9 @@ import (
 	"net"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/blocklist"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/request_throttle"
 	"github.com/miekg/dns"
 )
 
@@ -23,8 +23,6 @@ const (
 	UDP6MTU        = MTU - IPv6HeaderSize - UDPHeaderSize
 
 	queueSize = 1024
-
-	queryInterval = 10 * time.Millisecond
 )
 
 type Server struct {
@@ -48,8 +46,7 @@ type Server struct {
 	cache *RecordCache
 
 	// signal to tell the request to send a query to the remote server
-	timer       *time.Timer
-	querySignal chan bool
+	throttle *request_throttle.RequestThrottle
 }
 
 type Entry struct {
@@ -73,9 +70,10 @@ func NewDNSServer(parent context.Context, logger *slog.Logger) *Server {
 		insideSendQueue:    make(chan Entry, queueSize),
 		insideReceiveQueue: make(chan Entry, queueSize),
 
-		blocked:     blocklist.New(nil),
-		cache:       newRecordCache(ctx, logger),
-		querySignal: make(chan bool, 1),
+		blocked: blocklist.New(nil),
+		cache:   newRecordCache(ctx, logger),
+
+		throttle: request_throttle.NewRequestThrottle(ctx, 0),
 	}
 
 	// load root hints
@@ -87,9 +85,6 @@ func NewDNSServer(parent context.Context, logger *slog.Logger) *Server {
 
 	// check IPv6 support
 	server.supportIPv6.Store(checkIPv6Support())
-
-	// start the timer to allow sending queries to the remote server
-	server.sendIntervalTimer()
 
 	return server
 }
@@ -378,39 +373,6 @@ func (s *Server) sendResponse(addr net.Addr, resp *dns.Msg) {
 			"addr", addr.String(),
 		)
 	}
-}
-
-// ******************** Outside DNS Request Timer **********************
-
-func (s *Server) sendIntervalTimer() {
-	go func() {
-		s.timer = time.NewTimer(0 * time.Second)
-
-		for {
-			select {
-			case <-s.ctx.Done():
-				if s.timer != nil && !s.timer.Stop() {
-					select {
-					case <-s.timer.C:
-					default:
-					}
-				}
-				return
-
-			case <-s.timer.C:
-				// Send a query to the remote server must wait for the timer.
-				// signal the request in a non-blocking way
-				select {
-				case s.querySignal <- true:
-				default:
-				}
-			}
-		}
-	}()
-}
-
-func (s *Server) resetTimer() {
-	s.timer.Reset(queryInterval)
 }
 
 // ******************** Public Interface **********************
