@@ -77,7 +77,7 @@ func NewDNSServer(parent context.Context, logger *slog.Logger) *Server {
 	}
 
 	// load root hints
-	server.loadRootHints()
+	server.loadRootHints(ctx)
 
 	// handle DNS requests and responses
 	server.insideRequestHandler()
