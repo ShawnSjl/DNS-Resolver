@@ -1,4 +1,4 @@
-package server
+package resolver
 
 import (
 	"context"
@@ -7,12 +7,13 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ShawnSjl/DNS-Resolver/internal/capability"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/config"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/request_throttle"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/rr_cache"
 	"github.com/miekg/dns"
 )
@@ -25,10 +26,11 @@ const (
 type Resolver struct {
 	ctx    context.Context
 	cancel context.CancelFunc
-	logger *slog.Logger
 
-	server      *Server
-	globalCache *rr_cache.Cache // cache for DNS records
+	rootLogger     *slog.Logger                      // root logger for the server
+	logger         *slog.Logger                      // logger for the current resolver
+	globalCache    *rr_cache.Cache                   // cache for DNS records
+	globalThrottle *request_throttle.RequestThrottle // throttle for global queries
 
 	domain  string
 	qType   uint16
@@ -39,37 +41,29 @@ type Resolver struct {
 
 	currentZoneIdx int        // index of zone in the stack
 	mutex          sync.Mutex // lock of stack
-	stack          []*Zone
-}
-
-type Zone struct {
-	logger *slog.Logger
-
-	name  string     // i.e. ".", "com.", "example.com."
-	mutex sync.Mutex // lock of nodes
-
-	// local cache with TTL countdown
-	ns       []dns.RR
-	glueA    []dns.RR
-	glueAAAA []dns.RR
-
-	searchedNS []string
+	stack          []*zone
 }
 
 // ******************** Initialization Interface **********************
 
-func NewResolver(server *Server, domain string, qType uint16) *Resolver {
-	ctx, cancel := context.WithCancel(server.ctx)
+func NewResolver(parent context.Context, logger *slog.Logger,
+	cache *rr_cache.Cache, throttle *request_throttle.RequestThrottle,
+	domain string, qType uint16) *Resolver {
+	ctx, cancel := context.WithCancel(parent)
 
 	// Add the root zone to the stack
 	resolver := &Resolver{
+		// resolver context and cancel function
 		ctx:    ctx,
 		cancel: cancel,
-		logger: server.rootLogger.WithGroup("resolver").With("domain", domain, "qType", qType),
 
-		server:      server,
-		globalCache: server.cache,
+		// global utils inherited from server
+		rootLogger:     logger,
+		logger:         logger.WithGroup("resolver").With("domain", domain, "qType", qType),
+		globalCache:    cache,
+		globalThrottle: throttle,
 
+		// resolver parameters
 		domain:  domain,
 		qType:   qType,
 		answers: []dns.RR{},
@@ -79,7 +73,7 @@ func NewResolver(server *Server, domain string, qType uint16) *Resolver {
 
 		mutex:          sync.Mutex{},
 		currentZoneIdx: 0,
-		stack:          []*Zone{},
+		stack:          []*zone{},
 	}
 
 	// Create the root zone, no need to countdown root zone's TTL, it should never expire'
@@ -91,9 +85,9 @@ func NewResolver(server *Server, domain string, qType uint16) *Resolver {
 	return resolver
 }
 
-func (r *Resolver) createRootZone(logger *slog.Logger) *Zone {
+func (r *Resolver) createRootZone(logger *slog.Logger) *zone {
 	logger = logger.With("zone", ".")
-	rootZone := &Zone{
+	rootZone := &zone{
 		name:       ".",
 		ns:         []dns.RR{},
 		glueA:      []dns.RR{},
@@ -144,7 +138,7 @@ func (r *Resolver) createRootZone(logger *slog.Logger) *Zone {
 
 // ******************** Resolve Interface **********************
 
-func (r *Resolver) resolve(depth int, seen map[string]bool) ([]dns.RR, error) {
+func (r *Resolver) Resolve(depth int, seen map[string]bool) ([]dns.RR, error) {
 	defer r.cancel()
 
 	resolverStarted := time.Now()
@@ -187,8 +181,9 @@ ResolveLoop:
 			}); ok {
 				var result []dns.RR
 				for _, rr := range rrSet.RRs() {
-					subResolver := NewResolver(r.server, rr.(*dns.CNAME).Target, r.qType)
-					resolveResults, subErr := subResolver.resolve(depth+1, seen)
+					subResolver := NewResolver(r.ctx, r.rootLogger, r.globalCache, r.globalThrottle,
+						rr.(*dns.CNAME).Target, r.qType)
+					resolveResults, subErr := subResolver.Resolve(depth+1, seen)
 					if subErr != nil {
 						return nil, fmt.Errorf("fail to do subquery for %s: %e", rr.(*dns.CNAME).Target, subErr)
 					}
@@ -260,8 +255,8 @@ ResolveLoop:
 				r.logger.Info("No glue record available for NS record, query for it", "ns", ns.Ns)
 
 				// use sub resolver to get the glue record
-				subResolver := NewResolver(r.server, ns.Ns, dns.TypeA)
-				subResults, subErr := subResolver.resolve(depth+1, seen)
+				subResolver := NewResolver(r.ctx, r.rootLogger, r.globalCache, r.globalThrottle, ns.Ns, dns.TypeA)
+				subResults, subErr := subResolver.Resolve(depth+1, seen)
 				if subErr != nil {
 					return nil, fmt.Errorf("fail to do subquery for %s: %e", ns.Ns, subErr)
 				}
@@ -285,7 +280,7 @@ ResolveLoop:
 	}
 }
 
-func (r *Resolver) handleWeightRRSetQuery(zone *Zone, ns string, wSet *rr_cache.WeightedRRSet) {
+func (r *Resolver) handleWeightRRSetQuery(zone *zone, ns string, wSet *rr_cache.WeightedRRSet) {
 	// Pick a glue record from weighted RR set
 	glue, picked := wSet.Pick()
 	if !picked {
@@ -302,7 +297,7 @@ func (r *Resolver) handleWeightRRSetQuery(zone *Zone, ns string, wSet *rr_cache.
 	}()
 }
 
-func (r *Resolver) handleRRSetQuery(zone *Zone, ns string, rrSet []dns.RR) {
+func (r *Resolver) handleRRSetQuery(zone *zone, ns string, rrSet []dns.RR) {
 	go func() {
 		_, err := r.handleQuery(zone, ns, rrSet[rand.IntN(len(rrSet))])
 		if err != nil {
@@ -312,7 +307,7 @@ func (r *Resolver) handleRRSetQuery(zone *Zone, ns string, rrSet []dns.RR) {
 }
 
 // Usually query the target NS with the current zone's glue record
-func (r *Resolver) handleQuery(currentZone *Zone, ns string, rr dns.RR) (time.Duration, error) {
+func (r *Resolver) handleQuery(currentZone *zone, ns string, rr dns.RR) (time.Duration, error) {
 	// Get the remote address of the glue record
 	var remoteIP string
 	switch rr := rr.(type) {
@@ -357,7 +352,7 @@ func (r *Resolver) sendQuery(remoteIP string) (time.Duration, error) {
 
 	// Wait for the query signal
 	t0 := time.Now()
-	r.server.throttle.Wait(remoteIP)
+	r.globalThrottle.Wait(remoteIP)
 	if r.ctx.Err() != nil {
 		return 0, fmt.Errorf("resolver context is done")
 	}
@@ -400,9 +395,9 @@ func (r *Resolver) sendQuery(remoteIP string) (time.Duration, error) {
 	// Get the buffer size based on the remote address
 	var size int
 	if remoteAddr.IP.To4() != nil {
-		size = UDP4MTU
+		size = config.UDP4MTU
 	} else {
-		size = UDP6MTU
+		size = config.UDP6MTU
 	}
 	buf := make([]byte, size)
 
@@ -490,15 +485,15 @@ func (r *Resolver) sendQuery(remoteIP string) (time.Duration, error) {
 		}
 
 		// Add answer to local cache of glue
-		zone := r.findZone(rr.Header().Name)
-		if zone == nil {
+		currentZone := r.findZone(rr.Header().Name)
+		if currentZone == nil {
 			continue
 		}
 		// Check if glue record is in bailiwick
-		if dns.IsSubDomain(zone.name, dns.Fqdn(rr.Header().Name)) {
+		if dns.IsSubDomain(currentZone.name, dns.Fqdn(rr.Header().Name)) {
 			r.globalCache.AddRR(rr, true)
 		}
-		zone.addGlue(rr)
+		currentZone.addGlue(rr)
 	}
 	if getAnswer {
 		return rtt, nil // return nil if there is an answer
@@ -512,8 +507,8 @@ func (r *Resolver) sendQuery(remoteIP string) (time.Duration, error) {
 			//	rr.Header().Rrtype)
 			continue
 		}
-		zone := r.getZone(rr.Header().Name)
-		zone.addNS(rr)
+		currentZone := r.getZone(rr.Header().Name)
+		currentZone.addNS(rr)
 	}
 
 	// Handle Additional RRs
@@ -522,15 +517,15 @@ func (r *Resolver) sendQuery(remoteIP string) (time.Duration, error) {
 			//r.logger.Info("Ignore OPT record")
 			continue
 		}
-		zone := r.findZone(rr.Header().Name)
-		if zone == nil {
+		currentZone := r.findZone(rr.Header().Name)
+		if currentZone == nil {
 			continue
 		}
 		// Check if glue record is in bailiwick
-		if dns.IsSubDomain(zone.name, dns.Fqdn(rr.Header().Name)) {
+		if dns.IsSubDomain(currentZone.name, dns.Fqdn(rr.Header().Name)) {
 			r.globalCache.AddRR(rr, true)
 		}
-		zone.addGlue(rr)
+		currentZone.addGlue(rr)
 	}
 
 	// Check if resolver needs to go into next zone
@@ -542,17 +537,17 @@ func (r *Resolver) sendQuery(remoteIP string) (time.Duration, error) {
 	return rtt, nil
 }
 
-func (r *Resolver) getZone(name string) *Zone {
+func (r *Resolver) getZone(name string) *zone {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
-	for _, zone := range r.stack {
-		if zone.name == name {
-			return zone
+	for _, z := range r.stack {
+		if z.name == name {
+			return z
 		}
 	}
 
-	zone := &Zone{
+	newZone := &zone{
 		logger:     r.logger.With("zone", name),
 		name:       name,
 		mutex:      sync.Mutex{},
@@ -561,146 +556,23 @@ func (r *Resolver) getZone(name string) *Zone {
 		glueAAAA:   []dns.RR{},
 		searchedNS: []string{},
 	}
-	zone.ttlCountdown(r.ctx)
-	r.stack = append(r.stack, zone)
-	return zone
+	newZone.ttlCountdown(r.ctx)
+	r.stack = append(r.stack, newZone)
+	return newZone
 }
 
-func (r *Resolver) findZone(name string) *Zone {
+func (r *Resolver) findZone(name string) *zone {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
-	for _, zone := range r.stack {
-		for _, ns := range zone.ns {
+	for _, z := range r.stack {
+		for _, ns := range z.ns {
 			if ns.(*dns.NS).Ns == name {
-				return zone
+				return z
 			}
 		}
 	}
 	return nil
-}
-
-func (z *Zone) addNS(rr dns.RR) {
-	z.mutex.Lock()
-	defer z.mutex.Unlock()
-
-	for i, ns := range z.ns {
-		if dns.IsDuplicate(rr, ns) {
-			z.ns[i] = rr
-			return
-		}
-	}
-
-	z.ns = append(z.ns, rr)
-}
-
-func (z *Zone) addGlue(rr dns.RR) {
-	z.mutex.Lock()
-	defer z.mutex.Unlock()
-
-	switch rr.Header().Rrtype {
-	case dns.TypeA:
-		z.glueA = append(z.glueA, rr)
-	case dns.TypeAAAA:
-		z.glueAAAA = append(z.glueAAAA, rr)
-	default:
-		z.logger.Warn("Unsupported record type during glue record addition",
-			"zone", z.name,
-			"type", rr.Header().Rrtype,
-		)
-	}
-}
-
-// Get a random unsearched NS from the zone
-func (z *Zone) getRandomNS() (*dns.NS, error) {
-	z.mutex.Lock()
-	defer z.mutex.Unlock()
-
-	// Shuffle the NS records
-	shuffled := make([]dns.RR, len(z.ns))
-	copy(shuffled, z.ns)
-	rand.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
-
-	// Get a non-searched NS
-	for _, rr := range shuffled {
-		switch ns := rr.(type) {
-		case *dns.NS:
-			if !slices.Contains(z.searchedNS, ns.Ns) {
-				nsCopy := dns.Copy(ns) // use copy to avoid modifying the original RR
-				return nsCopy.(*dns.NS), nil
-			}
-		default:
-			return nil, fmt.Errorf("Non-NS record during random NS: %d", rr.Header().Rrtype)
-		}
-	}
-	return nil, nil
-}
-
-func (z *Zone) getGlue(domain string, supportIPv6 bool) ([]dns.RR, error) {
-	z.mutex.Lock()
-	defer z.mutex.Unlock()
-
-	result := make([]dns.RR, 0)
-
-	for _, glue := range z.glueA {
-		if dns.Fqdn(glue.Header().Name) == dns.Fqdn(domain) {
-			glueCopy := dns.Copy(glue) // use copy to avoid modifying the original RR
-			result = append(result, glueCopy)
-		}
-	}
-
-	if supportIPv6 {
-		for _, glue := range z.glueAAAA {
-			if dns.Fqdn(glue.Header().Name) == dns.Fqdn(domain) {
-				glueCopy := dns.Copy(glue) // use copy to avoid modifying the original RR
-				result = append(result, glueCopy)
-			}
-		}
-	}
-
-	return result, nil
-}
-
-func (z *Zone) ttlCountdown(ctx context.Context) {
-	go func() {
-		ticker := time.NewTicker(time.Second)
-
-		for {
-			select {
-			case <-ctx.Done():
-				ticker.Stop()
-				return
-
-			case <-ticker.C:
-				z.logger.Debug("TTL timer fired")
-				z.mutex.Lock()
-
-				z.ns = handleTTLCountdown(z.ns)
-				z.glueA = handleTTLCountdown(z.glueA)
-				z.glueAAAA = handleTTLCountdown(z.glueAAAA)
-
-				z.mutex.Unlock()
-			}
-		}
-	}()
-}
-
-func handleTTLCountdown(rrSet []dns.RR) []dns.RR {
-	n := 0
-	for _, rr := range rrSet {
-		rr.Header().Ttl--
-		if rr.Header().Ttl > 0 {
-			rrSet[n] = rr
-			n++
-		}
-	}
-	return rrSet[:n]
-}
-
-func (z *Zone) markSearchedNS(ns string) {
-	z.mutex.Lock()
-	defer z.mutex.Unlock()
-	z.searchedNS = append(z.searchedNS, ns)
 }
 
 func (r *Resolver) signalReady() {
@@ -745,26 +617,7 @@ func newDnsQueryMsg(name string, t uint16) *dns.Msg {
 }
 
 func (r *Resolver) dump() {
-	for _, zone := range r.stack {
-		zone.dump()
-	}
-}
-
-func (z *Zone) dump() {
-	fmt.Println("Zone: ", z.name)
-
-	fmt.Println("  NS:")
-	for _, ns := range z.ns {
-		fmt.Println("    ", ns.String())
-	}
-
-	fmt.Println("  Glue A:")
-	for _, glue := range z.glueA {
-		fmt.Println("    ", glue.String())
-	}
-
-	fmt.Println("  Glue AAAA:")
-	for _, glue := range z.glueAAAA {
-		fmt.Println("    ", glue.String())
+	for _, z := range r.stack {
+		z.dump()
 	}
 }

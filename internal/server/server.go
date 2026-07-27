@@ -9,19 +9,14 @@ import (
 	"strings"
 
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/blocklist"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/config"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/request_throttle"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/resolver"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/rr_cache"
 	"github.com/miekg/dns"
 )
 
 const (
-	MTU            = 1500
-	UDPHeaderSize  = 8
-	IPv4HeaderSize = 20
-	IPv6HeaderSize = 40
-	UDP4MTU        = MTU - IPv4HeaderSize - UDPHeaderSize
-	UDP6MTU        = MTU - IPv6HeaderSize - UDPHeaderSize
-
 	queueSize = 1024
 )
 
@@ -96,7 +91,7 @@ func (s *Server) RunIPv4(port uint16) {
 	}
 	s.udpConnIPv4 = conn
 
-	s.readFromConn(conn, UDP4MTU)
+	s.readFromConn(conn, config.UDP4MTU)
 }
 
 func (s *Server) RunIPv6(port uint16) {
@@ -111,7 +106,7 @@ func (s *Server) RunIPv6(port uint16) {
 	}
 	s.udpConnIPv6 = conn
 
-	s.readFromConn(conn, UDP6MTU)
+	s.readFromConn(conn, config.UDP6MTU)
 }
 
 func (s *Server) readFromConn(conn *net.UDPConn, mtu int) {
@@ -211,8 +206,8 @@ func (s *Server) insideRequestHandler() {
 
 				// Resolve the request
 				go func() {
-					resolver := NewResolver(s, question.Name, question.Qtype)
-					result, err := resolver.resolve(1, make(map[string]bool))
+					newResolver := resolver.NewResolver(s.ctx, s.logger, s.cache, s.throttle, question.Name, question.Qtype)
+					result, err := newResolver.Resolve(1, make(map[string]bool))
 					if err != nil {
 						s.logger.Error("Fail to resolve DNS request",
 							"err", err,
