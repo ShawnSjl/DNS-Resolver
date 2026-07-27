@@ -11,6 +11,7 @@ import (
 
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/blocklist"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/request_throttle"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/rr_cache"
 	"github.com/miekg/dns"
 )
 
@@ -43,7 +44,7 @@ type Server struct {
 	blocked *blocklist.Blocklist
 
 	// global cache
-	cache *RecordCache
+	cache *rr_cache.Cache
 
 	// signal to tell the request to send a query to the remote server
 	throttle *request_throttle.RequestThrottle
@@ -71,7 +72,7 @@ func NewDNSServer(parent context.Context, logger *slog.Logger) *Server {
 		insideReceiveQueue: make(chan Entry, queueSize),
 
 		blocked: blocklist.New(nil),
-		cache:   newRecordCache(ctx, logger),
+		cache:   rr_cache.NewCache(ctx, logger),
 
 		throttle: request_throttle.NewRequestThrottle(ctx, 0),
 	}
@@ -392,5 +393,5 @@ func (s *Server) ListBlocked() string {
 }
 
 func (s *Server) ListCache() string {
-	return s.cache.toString()
+	return s.cache.ToString()
 }
