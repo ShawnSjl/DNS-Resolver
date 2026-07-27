@@ -167,9 +167,9 @@ ResolveLoop:
 
 		case <-r.readySignal:
 			r.logger.Debug("resolver phase", "phase", "ready", "duration", time.Since(resolverStarted))
-
 			t0 := time.Now()
-			// Check global cache
+
+			// Check if global cache has answers
 			if rrSet, ok := r.globalCache.GetWeightedRRSet(rr_cache.SetKey{
 				Domain: r.domain,
 				QType:  r.qType,
@@ -187,12 +187,12 @@ ResolveLoop:
 				var result []dns.RR
 				for _, rr := range rrSet.RRs() {
 					subResolver := NewResolver(r.server, rr.(*dns.CNAME).Target, r.qType)
-					ResolveResults, subErr := subResolver.resolve(depth+1, seen)
+					resolveResults, subErr := subResolver.resolve(depth+1, seen)
 					if subErr != nil {
 						return nil, fmt.Errorf("fail to do subquery for %s: %e", rr.(*dns.CNAME).Target, subErr)
 					}
 					result = append(result, rr)                // add CNAME record to result
-					result = append(result, ResolveResults...) // add subquery result to result
+					result = append(result, resolveResults...) // add subquery result to result
 				}
 				return result, nil
 			}
@@ -206,8 +206,8 @@ ResolveLoop:
 			// Get current zone
 			currentZone := r.stack[r.currentZoneIdx]
 
-			t1 := time.Now()
 			// Get random unsearched NS record from current zone
+			t1 := time.Now()
 			ns, getErr := currentZone.getRandomNS()
 			if getErr != nil {
 				return nil, fmt.Errorf("fail to get random NS record: %e", getErr)
@@ -228,41 +228,37 @@ ResolveLoop:
 				r.signalReady()
 				continue ResolveLoop
 			}
+
 			r.logger.Debug("resolver phase", "phase", "get_random_ns", "duration", time.Since(t1))
+			r.logger.Debug("Get random NS record", "zone", currentZone.name, "ns", ns.Ns)
 
-			r.logger.Debug("Get random NS record",
-				"zone", currentZone.name,
-				"ns", ns.Ns,
-			)
-
-			t2 := time.Now()
 			// Get glue records of the NS record
 			glues, glueErr := currentZone.getGlue(ns.Ns, r.server.supportIPv6.Load())
 			if glueErr != nil {
 				return nil, fmt.Errorf("fail to get glue records of NS record: %e", glueErr)
 			}
 
-			// If there is no available glue record, query for it
-			// FIXME: should Pick from a weight RRSet
-			if len(glues) == 0 {
-				// Try to get the glue record from global cache
-				if cachedGlue, ok := r.globalCache.GetWeightedRRSet(rr_cache.SetKey{Domain: ns.Ns,
-					QType: dns.TypeA, QClass: dns.ClassINET}); ok {
-					glues = append(glues, cachedGlue.RRs()...)
+			// If there is available glue record, handle the query directly
+			if len(glues) != 0 {
+				r.handleRRSetQuery(currentZone, ns.Ns, glues)
+			} else if cachedAGlue, ok := r.globalCache.GetWeightedRRSet(rr_cache.SetKey{
+				Domain: ns.Ns,
+				QType:  dns.TypeA,
+				QClass: dns.ClassINET}); ok {
+				// If there is no available glue record, try to get the A glue record from global cache
+				r.handleWeightRRSetQuery(currentZone, ns.Ns, cachedAGlue)
+			} else if r.server.supportIPv6.Load() {
+				if cachedAAAAGlue, ok := r.globalCache.GetWeightedRRSet(rr_cache.SetKey{
+					Domain: ns.Ns,
+					QType:  dns.TypeAAAA,
+					QClass: dns.ClassINET}); ok {
+					// If there is no available glue record, try to get the AAAA glue record from global cache
+					r.handleWeightRRSetQuery(currentZone, ns.Ns, cachedAAAAGlue)
 				}
-				if r.server.supportIPv6.Load() {
-					if cachedGlue, ok := r.globalCache.GetWeightedRRSet(rr_cache.SetKey{Domain: ns.Ns,
-						QType: dns.TypeAAAA, QClass: dns.ClassINET}); ok {
-						glues = append(glues, cachedGlue.RRs()...)
-					}
-				}
-				if len(glues) != 0 {
-					goto hasGlue
-				}
-
+			} else {
 				r.logger.Info("No glue record available for NS record, query for it", "ns", ns.Ns)
 
-				// use sub query to get the glue record
+				// use sub resolver to get the glue record
 				subResolver := NewResolver(r.server, ns.Ns, dns.TypeA)
 				subResults, subErr := subResolver.resolve(depth+1, seen)
 				if subErr != nil {
@@ -277,42 +273,65 @@ ResolveLoop:
 				}
 
 				// Store the subquery result to local cache and global cache
-				for _, glue := range glues {
+				for _, glue := range subResults {
 					currentZone.addGlue(glue)
 					r.globalCache.AddRR(glue, true)
 				}
-				glues = subResults
-			}
-		hasGlue:
 
-			// Choose a glue record randomly and get its IP address
-			glue := glues[rand.IntN(len(glues))]
-			var remoteIP string
-			switch rr := glue.(type) {
-			case *dns.A:
-				remoteIP = rr.A.String()
-			case *dns.AAAA:
-				remoteIP = rr.AAAA.String()
-			default:
-				return nil, fmt.Errorf("unsupported glue record type during query: %d", rr.Header().Rrtype)
+				r.handleRRSetQuery(currentZone, ns.Ns, subResults)
 			}
-			r.logger.Debug("resolver phase", "phase", "get_glue", "duration", time.Since(t2))
-
-			// Send the query to the chosen glue server
-			go func() {
-				sendErr := r.sendQuery(remoteIP)
-				if sendErr != nil {
-					r.logger.Error("Fail to send query", "err", sendErr)
-				} else {
-					currentZone.markSearchedNS(ns.Ns)
-				}
-			}()
 		}
 	}
 }
 
-// FIXME: should return rrt
-func (r *Resolver) sendQuery(remoteIP string) error {
+func (r *Resolver) handleWeightRRSetQuery(zone *Zone, ns string, wSet *rr_cache.WeightedRRSet) {
+	// Pick a glue record from weighted RR set
+	glue, picked := wSet.Pick()
+	if !picked {
+		r.logger.Error("Fail to pick glue record from weighted RR set")
+	}
+
+	go func() {
+		if rtt, err := r.handleQuery(zone, ns, glue); err != nil {
+			wSet.ReportRTT(glue, false, rtt)
+			r.logger.Error("Fail to handle query", "err", err)
+		} else {
+			wSet.ReportRTT(glue, true, rtt)
+		}
+	}()
+}
+
+func (r *Resolver) handleRRSetQuery(zone *Zone, ns string, rrSet []dns.RR) {
+	go func() {
+		_, err := r.handleQuery(zone, ns, rrSet[rand.IntN(len(rrSet))])
+		if err != nil {
+			r.logger.Error("Fail to handle query", "err", err)
+		}
+	}()
+}
+
+// Usually query the target NS with the current zone's glue record
+func (r *Resolver) handleQuery(currentZone *Zone, ns string, rr dns.RR) (time.Duration, error) {
+	// Get the remote address of the glue record
+	var remoteIP string
+	switch rr := rr.(type) {
+	case *dns.A:
+		remoteIP = rr.A.String()
+	case *dns.AAAA:
+		remoteIP = rr.AAAA.String()
+	default:
+		return 0, fmt.Errorf("unsupported glue record type during query: %d", rr.Header().Rrtype)
+	}
+
+	if rtt, err := r.sendQuery(remoteIP); err != nil {
+		return 0, err
+	} else {
+		currentZone.markSearchedNS(ns)
+		return rtt, nil
+	}
+}
+
+func (r *Resolver) sendQuery(remoteIP string) (time.Duration, error) {
 	queryStarted := time.Now()
 	defer func() {
 		r.logger.Debug("resolver query duration", "duration", time.Since(queryStarted), "domain", r.domain)
@@ -332,21 +351,21 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 	addrStr := net.JoinHostPort(remoteIP, "53")
 	remoteAddr, resolveErr := net.ResolveUDPAddr("udp", addrStr)
 	if resolveErr != nil {
-		return fmt.Errorf("fail to resolve UDP address %s: %e", addrStr, resolveErr)
+		return 0, fmt.Errorf("fail to resolve UDP address %s: %e", addrStr, resolveErr)
 	}
 
 	// Wait for the query signal
 	t0 := time.Now()
 	r.server.throttle.Wait(remoteIP)
 	if r.ctx.Err() != nil {
-		return fmt.Errorf("resolver context is done")
+		return 0, fmt.Errorf("resolver context is done")
 	}
 	r.logger.Debug("resolver phase", "phase", "wait_timer", "duration", time.Since(t0))
 
 	// Create a UDP connection
 	conn, connErr := net.DialUDP("udp", nil, remoteAddr)
 	if connErr != nil {
-		return fmt.Errorf("fail to dial UDP: %e", connErr)
+		return 0, fmt.Errorf("fail to dial UDP: %e", connErr)
 	}
 	defer func(conn *net.UDPConn) {
 		err := conn.Close()
@@ -358,7 +377,7 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 	// Set the deadline for the connection
 	setErr := conn.SetDeadline(time.Now().Add(timeoutInterval))
 	if setErr != nil {
-		return fmt.Errorf("fail to set UDP connection deadline: %e", setErr)
+		return 0, fmt.Errorf("fail to set UDP connection deadline: %e", setErr)
 	}
 
 	// Generate a new DNS query message
@@ -368,13 +387,13 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 	// Pack the DNS query
 	payload, packErr := req.Pack()
 	if packErr != nil {
-		return fmt.Errorf("fail to pack DNS query: %e", packErr)
+		return 0, fmt.Errorf("fail to pack DNS query: %e", packErr)
 	}
 
 	t1 := time.Now()
 	// Send the DNS query
 	if _, sendErr := conn.Write(payload); sendErr != nil {
-		return fmt.Errorf("fail to send DNS query: %e", sendErr)
+		return 0, fmt.Errorf("fail to send DNS query: %e", sendErr)
 	}
 
 	// Get the buffer size based on the remote address
@@ -394,10 +413,10 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 			// Check if the error is a timeout
 			var ne net.Error
 			if errors.As(readErr, &ne) && ne.Timeout() {
-				return fmt.Errorf("UDP connection timeout: %e", readErr)
+				return 0, fmt.Errorf("UDP connection timeout: %e", readErr)
 			}
 
-			return fmt.Errorf("fail to read from UDP connection: %e", readErr)
+			return 0, fmt.Errorf("fail to read from UDP connection: %e", readErr)
 		}
 
 		// Check the source address of the response
@@ -414,17 +433,17 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 		break
 	}
 	r.logger.Debug("resolver phase", "phase", "get_response", "duration", time.Since(t1), "domain", r.domain)
-	// TODO: store this RTT to the cache
+	rtt := time.Since(t1)
 
 	// Unpack the DNS response
 	var resp dns.Msg
 	if unpackErr := resp.Unpack(buf[:nByte]); unpackErr != nil {
-		return fmt.Errorf("fail to unpack DNS response: %e", unpackErr)
+		return rtt, fmt.Errorf("fail to unpack DNS response: %e", unpackErr)
 	}
 
 	// If the response is not a DNS response
 	if !resp.Response {
-		return fmt.Errorf("received non-response DNS message")
+		return rtt, fmt.Errorf("received non-response DNS message")
 	}
 
 	// Check if the response has the correct transaction ID
@@ -433,13 +452,13 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 			"expected", currentTransactionID,
 			"actual", resp.MsgHdr.Id,
 		)
-		return fmt.Errorf("received DNS response with wrong transaction ID")
+		return rtt, fmt.Errorf("received DNS response with wrong transaction ID")
 	}
 
 	// Check if the response has no answer
 	if len(resp.Answer) == 0 && len(resp.Ns) == 0 {
 		r.logger.Warn("Received DNS response with no answer")
-		return nil
+		return rtt, nil
 	}
 
 	r.logger.Debug("Received DNS response",
@@ -481,7 +500,7 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 		zone.addGlue(rr)
 	}
 	if getAnswer {
-		return nil // return nil if there is an answer
+		return rtt, nil // return nil if there is an answer
 	}
 
 	// Handle Authoritative RRs
@@ -519,7 +538,7 @@ func (r *Resolver) sendQuery(remoteIP string) error {
 			r.currentZoneIdx++
 		}
 	}
-	return nil
+	return rtt, nil
 }
 
 func (r *Resolver) getZone(name string) *Zone {
