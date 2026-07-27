@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"syscall"
 
-	"github.com/ShawnSjl/DNS-Resolver/internal/server/dns"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server"
 	_interface "github.com/ShawnSjl/DNS-Resolver/internal/server/interface"
 )
 
@@ -58,7 +58,7 @@ func main() {
 	logger := slog.New(handler)
 
 	// create DNS server
-	dnsServer := dns.NewDNSServer(rootCtx, logger)
+	dnsServer := server.NewDNSServer(rootCtx, logger)
 	dnsServer.RunIPv4(uint16(dnsPort)) // run DNS server in IPv4
 	dnsServer.RunIPv6(uint16(dnsPort)) // run DNS server in IPv6
 
