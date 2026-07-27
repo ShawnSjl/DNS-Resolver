@@ -39,6 +39,6 @@ func (s *Server) loadRootHints(ctx context.Context) {
 
 func (s *Server) addRootHintsToCache(rrs []dns.RR) {
 	for _, rr := range rrs {
-		s.cache.add(rr, false)
+		s.cache.AddRR(rr, false)
 	}
 }
