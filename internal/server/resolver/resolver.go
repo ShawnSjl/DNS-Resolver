@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ShawnSjl/DNS-Resolver/internal/capability"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/capability"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/config"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/request_throttle"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/rr_cache"

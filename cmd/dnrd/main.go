@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ShawnSjl/DNS-Resolver/internal/capability"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/capability"
 	_interface "github.com/ShawnSjl/DNS-Resolver/internal/server/interface"
 )
 
