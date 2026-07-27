@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ShawnSjl/DNS-Resolver/internal/capability"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/rr_cache"
 	"github.com/miekg/dns"
 )
@@ -233,7 +234,7 @@ ResolveLoop:
 			r.logger.Debug("Get random NS record", "zone", currentZone.name, "ns", ns.Ns)
 
 			// Get glue records of the NS record
-			glues, glueErr := currentZone.getGlue(ns.Ns, r.server.supportIPv6.Load())
+			glues, glueErr := currentZone.getGlue(ns.Ns, capability.HasIPv6Stack())
 			if glueErr != nil {
 				return nil, fmt.Errorf("fail to get glue records of NS record: %e", glueErr)
 			}
@@ -247,7 +248,7 @@ ResolveLoop:
 				QClass: dns.ClassINET}); ok {
 				// If there is no available glue record, try to get the A glue record from global cache
 				r.handleWeightRRSetQuery(currentZone, ns.Ns, cachedAGlue)
-			} else if r.server.supportIPv6.Load() {
+			} else if capability.HasIPv6Stack() {
 				if cachedAAAAGlue, ok := r.globalCache.GetWeightedRRSet(rr_cache.SetKey{
 					Domain: ns.Ns,
 					QType:  dns.TypeAAAA,

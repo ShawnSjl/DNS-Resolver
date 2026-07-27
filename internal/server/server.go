@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"strings"
-	"sync/atomic"
 
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/blocklist"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/request_throttle"
@@ -31,8 +30,6 @@ type Server struct {
 	cancel     context.CancelFunc
 	logger     *slog.Logger
 	rootLogger *slog.Logger
-
-	supportIPv6 atomic.Bool
 
 	// inside
 	udpConnIPv4        *net.UDPConn
@@ -66,8 +63,6 @@ func NewDNSServer(parent context.Context, logger *slog.Logger) *Server {
 		logger:     logger.With("module", "dns-server"),
 		rootLogger: logger,
 
-		supportIPv6: atomic.Bool{},
-
 		insideSendQueue:    make(chan Entry, queueSize),
 		insideReceiveQueue: make(chan Entry, queueSize),
 
@@ -84,50 +79,7 @@ func NewDNSServer(parent context.Context, logger *slog.Logger) *Server {
 	server.insideRequestHandler()
 	server.insideResponseHandler()
 
-	// check IPv6 support
-	server.supportIPv6.Store(checkIPv6Support())
-
 	return server
-}
-
-func checkIPv6Support() bool {
-	// Get all network interfaces
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		log.Fatal("Fail to get network interfaces: ", err)
-	}
-
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 {
-			continue
-		}
-
-		if iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-
-		// Get all addresses of the interface
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-
-		for _, addr := range addrs {
-			var ip net.IP
-
-			switch v := addr.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			}
-
-			if ip != nil && ip.To4() == nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // ******************** Server **********************
