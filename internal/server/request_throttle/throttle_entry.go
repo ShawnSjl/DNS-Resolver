@@ -6,14 +6,18 @@ import (
 )
 
 type throttleEntry struct {
-	ctx context.Context
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	interval time.Duration
 	timer    *time.Timer
 	ch       chan struct{}
+
+	waitCount  int32
+	accessTime time.Time
 }
 
-func newThrottleEntry(ctx context.Context, interval time.Duration) *throttleEntry {
+func newThrottleEntry(parent context.Context, interval time.Duration) *throttleEntry {
 	// check the interval
 	if interval <= 0 {
 		interval = defaultInterval
@@ -21,11 +25,17 @@ func newThrottleEntry(ctx context.Context, interval time.Duration) *throttleEntr
 		interval = minimumInterval
 	}
 
+	ctx, cancel := context.WithCancel(parent)
 	e := &throttleEntry{
-		ctx:      ctx,
-		interval: interval,
-		ch:       make(chan struct{}, 1),
+		ctx:        ctx,
+		cancel:     cancel,
+		interval:   interval,
+		ch:         make(chan struct{}, 1),
+		waitCount:  0,
+		accessTime: time.Now(),
 	}
+
+	// start the timer to signal the channel
 	go e.fire()
 	return e
 }

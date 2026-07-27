@@ -8,21 +8,24 @@ import (
 )
 
 func TestThrottleEntryInterval_Default(t *testing.T) {
-	entry := newThrottleEntry(nil, 0*time.Millisecond)
+	ctx := context.Background()
+	entry := newThrottleEntry(ctx, 0*time.Millisecond)
 	if entry.interval != defaultInterval {
 		t.Fatal("expected default interval")
 	}
 }
 
 func TestThrottleEntryInterval_Minimum(t *testing.T) {
-	entry := newThrottleEntry(nil, 1*time.Millisecond)
+	ctx := context.Background()
+	entry := newThrottleEntry(ctx, 1*time.Millisecond)
 	if entry.interval != minimumInterval {
 		t.Fatal("expected minimum interval")
 	}
 }
 
 func TestThrottleEntryInterval_Custom(t *testing.T) {
-	entry := newThrottleEntry(nil, 400*time.Millisecond)
+	ctx := context.Background()
+	entry := newThrottleEntry(ctx, 400*time.Millisecond)
 	if entry.interval != 400*time.Millisecond {
 		t.Fatal("expected exact interval")
 	}
