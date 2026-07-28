@@ -3,6 +3,7 @@ package request_throttle
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -13,16 +14,46 @@ const (
 	entryIdleTimeout     = 5 * time.Minute
 )
 
+var (
+	globalThrottle atomic.Pointer[RequestThrottle]
+	startOnce      sync.Once
+)
+
 type RequestThrottle struct {
-	ctx context.Context
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	mu      sync.Mutex
 	entries map[string]*throttleEntry
 
 	interval time.Duration
+
+	closeOnce sync.Once
 }
 
+// ******************** Global Cache Interface **********************
+
+func StartGlobal(parent context.Context, interval time.Duration) {
+	startOnce.Do(func() {
+		globalThrottle.Store(NewRequestThrottle(parent, interval))
+	})
+}
+
+func Global() *RequestThrottle {
+	throttle := globalThrottle.Load()
+	if throttle == nil {
+		panic("RequestThrottle not started")
+	}
+	return throttle
+}
+
+// ******************** Normal Interface **********************
+
 func NewRequestThrottle(parent context.Context, interval time.Duration) *RequestThrottle {
+	if parent == nil {
+		parent = context.Background()
+	}
+
 	// check the interval
 	if interval <= 0 {
 		interval = defaultInterval
@@ -30,9 +61,11 @@ func NewRequestThrottle(parent context.Context, interval time.Duration) *Request
 		interval = minimumInterval
 	}
 
-	ctx := context.WithoutCancel(parent)
+	ctx, cancel := context.WithCancel(parent)
+
 	throttle := &RequestThrottle{
 		ctx:      ctx,
+		cancel:   cancel,
 		mu:       sync.Mutex{},
 		entries:  make(map[string]*throttleEntry),
 		interval: interval,
@@ -41,6 +74,10 @@ func NewRequestThrottle(parent context.Context, interval time.Duration) *Request
 	// Start recycle timer
 	go throttle.recycle()
 	return throttle
+}
+
+func (t *RequestThrottle) Close() {
+	t.closeOnce.Do(t.cancel)
 }
 
 // Wait blocks thread until the key is accessed before the given duration

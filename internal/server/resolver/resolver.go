@@ -27,9 +27,8 @@ type Resolver struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	rootLogger     *slog.Logger                      // root logger for the server
-	logger         *slog.Logger                      // logger for the current resolver
-	globalThrottle *request_throttle.RequestThrottle // throttle for global queries
+	rootLogger *slog.Logger // root logger for the server
+	logger     *slog.Logger // logger for the current resolver
 
 	domain  string
 	qType   uint16
@@ -45,8 +44,7 @@ type Resolver struct {
 
 // ******************** Initialization Interface **********************
 
-func NewResolver(parent context.Context, logger *slog.Logger, throttle *request_throttle.RequestThrottle,
-	domain string, qType uint16) *Resolver {
+func NewResolver(parent context.Context, logger *slog.Logger, domain string, qType uint16) *Resolver {
 	ctx, cancel := context.WithCancel(parent)
 
 	// Add the root zone to the stack
@@ -55,10 +53,9 @@ func NewResolver(parent context.Context, logger *slog.Logger, throttle *request_
 		ctx:    ctx,
 		cancel: cancel,
 
-		// global utils inherited from server
-		rootLogger:     logger,
-		logger:         logger.WithGroup("resolver").With("domain", domain, "qType", qType),
-		globalThrottle: throttle,
+		// logger inherited from server
+		rootLogger: logger,
+		logger:     logger.WithGroup("resolver").With("domain", domain, "qType", qType),
 
 		// resolver parameters
 		domain:  domain,
@@ -178,8 +175,7 @@ ResolveLoop:
 			}); ok {
 				var result []dns.RR
 				for _, rr := range rrSet.RRs() {
-					subResolver := NewResolver(r.ctx, r.rootLogger, r.globalThrottle,
-						rr.(*dns.CNAME).Target, r.qType)
+					subResolver := NewResolver(r.ctx, r.rootLogger, rr.(*dns.CNAME).Target, r.qType)
 					resolveResults, subErr := subResolver.Resolve(depth+1, seen)
 					if subErr != nil {
 						return nil, fmt.Errorf("fail to do subquery for %s: %e", rr.(*dns.CNAME).Target, subErr)
@@ -252,7 +248,7 @@ ResolveLoop:
 				r.logger.Info("No glue record available for NS record, query for it", "ns", ns.Ns)
 
 				// use sub resolver to get the glue record
-				subResolver := NewResolver(r.ctx, r.rootLogger, r.globalThrottle, ns.Ns, dns.TypeA)
+				subResolver := NewResolver(r.ctx, r.rootLogger, ns.Ns, dns.TypeA)
 				subResults, subErr := subResolver.Resolve(depth+1, seen)
 				if subErr != nil {
 					return nil, fmt.Errorf("fail to do subquery for %s: %e", ns.Ns, subErr)
@@ -349,7 +345,7 @@ func (r *Resolver) sendQuery(remoteIP string) (time.Duration, error) {
 
 	// Wait for the query signal
 	t0 := time.Now()
-	r.globalThrottle.Wait(remoteIP)
+	request_throttle.Global().Wait(remoteIP)
 	if r.ctx.Err() != nil {
 		return 0, fmt.Errorf("resolver context is done")
 	}

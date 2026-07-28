@@ -35,9 +35,6 @@ type Server struct {
 
 	// blocked domains
 	blocked *blocklist.Blocklist
-
-	// signal to tell the request to send a query to the remote server
-	throttle *request_throttle.RequestThrottle
 }
 
 type Entry struct {
@@ -60,8 +57,6 @@ func NewDNSServer(parent context.Context, logger *slog.Logger) *Server {
 		insideReceiveQueue: make(chan Entry, queueSize),
 
 		blocked: blocklist.New(nil),
-
-		throttle: request_throttle.NewRequestThrottle(ctx, 0),
 	}
 
 	// start a global RR cache
@@ -69,6 +64,9 @@ func NewDNSServer(parent context.Context, logger *slog.Logger) *Server {
 
 	// load root hints
 	root_hints.Load(ctx, logger, rr_cache.Global())
+
+	// start a global request throttle
+	request_throttle.StartGlobal(ctx, 0)
 
 	// handle DNS requests and responses
 	server.insideRequestHandler()
@@ -206,7 +204,7 @@ func (s *Server) insideRequestHandler() {
 
 				// Resolve the request
 				go func() {
-					newResolver := resolver.NewResolver(s.ctx, s.logger, s.throttle, question.Name, question.Qtype)
+					newResolver := resolver.NewResolver(s.ctx, s.logger, question.Name, question.Qtype)
 					result, err := newResolver.Resolve(1, make(map[string]bool))
 					if err != nil {
 						s.logger.Error("Fail to resolve DNS request",
