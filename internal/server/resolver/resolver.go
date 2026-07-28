@@ -29,7 +29,6 @@ type Resolver struct {
 
 	rootLogger     *slog.Logger                      // root logger for the server
 	logger         *slog.Logger                      // logger for the current resolver
-	globalCache    *rr_cache.Cache                   // cache for DNS records
 	globalThrottle *request_throttle.RequestThrottle // throttle for global queries
 
 	domain  string
@@ -46,8 +45,7 @@ type Resolver struct {
 
 // ******************** Initialization Interface **********************
 
-func NewResolver(parent context.Context, logger *slog.Logger,
-	cache *rr_cache.Cache, throttle *request_throttle.RequestThrottle,
+func NewResolver(parent context.Context, logger *slog.Logger, throttle *request_throttle.RequestThrottle,
 	domain string, qType uint16) *Resolver {
 	ctx, cancel := context.WithCancel(parent)
 
@@ -60,7 +58,6 @@ func NewResolver(parent context.Context, logger *slog.Logger,
 		// global utils inherited from server
 		rootLogger:     logger,
 		logger:         logger.WithGroup("resolver").With("domain", domain, "qType", qType),
-		globalCache:    cache,
 		globalThrottle: throttle,
 
 		// resolver parameters
@@ -101,7 +98,7 @@ func (r *Resolver) createRootZone(logger *slog.Logger) *zone {
 		QType:  dns.TypeNS,
 		QClass: dns.ClassINET,
 	}
-	if rootNsSet, ok := r.globalCache.GetWeightedRRSet(rootNsKey); ok {
+	if rootNsSet, ok := rr_cache.Global().GetWeightedRRSet(rootNsKey); ok {
 		rootZone.ns = append(rootZone.ns, rootNsSet.RRs()...)
 	}
 
@@ -115,7 +112,7 @@ func (r *Resolver) createRootZone(logger *slog.Logger) *zone {
 				QType:  dns.TypeA,
 				QClass: dns.ClassINET,
 			}
-			if rootA, ok := r.globalCache.GetWeightedRRSet(rootAKey); ok {
+			if rootA, ok := rr_cache.Global().GetWeightedRRSet(rootAKey); ok {
 				rootZone.glueA = append(rootZone.glueA, rootA.RRs()...)
 			}
 
@@ -125,7 +122,7 @@ func (r *Resolver) createRootZone(logger *slog.Logger) *zone {
 				QType:  dns.TypeA,
 				QClass: dns.ClassINET,
 			}
-			if rootAAAA, ok := r.globalCache.GetWeightedRRSet(rootAAAAKey); ok {
+			if rootAAAA, ok := rr_cache.Global().GetWeightedRRSet(rootAAAAKey); ok {
 				rootZone.glueAAAA = append(rootZone.glueAAAA, rootAAAA.RRs()...)
 			}
 		default:
@@ -165,7 +162,7 @@ ResolveLoop:
 			t0 := time.Now()
 
 			// Check if global cache has answers
-			if rrSet, ok := r.globalCache.GetWeightedRRSet(rr_cache.SetKey{
+			if rrSet, ok := rr_cache.Global().GetWeightedRRSet(rr_cache.SetKey{
 				Domain: r.domain,
 				QType:  r.qType,
 				QClass: dns.ClassINET,
@@ -174,14 +171,14 @@ ResolveLoop:
 			}
 
 			// Check if global cache has CNAME record, do subquery to get the answer
-			if rrSet, ok := r.globalCache.GetWeightedRRSet(rr_cache.SetKey{
+			if rrSet, ok := rr_cache.Global().GetWeightedRRSet(rr_cache.SetKey{
 				Domain: r.domain,
 				QType:  dns.TypeCNAME,
 				QClass: dns.ClassINET,
 			}); ok {
 				var result []dns.RR
 				for _, rr := range rrSet.RRs() {
-					subResolver := NewResolver(r.ctx, r.rootLogger, r.globalCache, r.globalThrottle,
+					subResolver := NewResolver(r.ctx, r.rootLogger, r.globalThrottle,
 						rr.(*dns.CNAME).Target, r.qType)
 					resolveResults, subErr := subResolver.Resolve(depth+1, seen)
 					if subErr != nil {
@@ -237,14 +234,14 @@ ResolveLoop:
 			// If there is available glue record, handle the query directly
 			if len(glues) != 0 {
 				r.handleRRSetQuery(currentZone, ns.Ns, glues)
-			} else if cachedAGlue, ok := r.globalCache.GetWeightedRRSet(rr_cache.SetKey{
+			} else if cachedAGlue, ok := rr_cache.Global().GetWeightedRRSet(rr_cache.SetKey{
 				Domain: ns.Ns,
 				QType:  dns.TypeA,
 				QClass: dns.ClassINET}); ok {
 				// If there is no available glue record, try to get the A glue record from global cache
 				r.handleWeightRRSetQuery(currentZone, ns.Ns, cachedAGlue)
 			} else if capability.HasIPv6Stack() {
-				if cachedAAAAGlue, ok := r.globalCache.GetWeightedRRSet(rr_cache.SetKey{
+				if cachedAAAAGlue, ok := rr_cache.Global().GetWeightedRRSet(rr_cache.SetKey{
 					Domain: ns.Ns,
 					QType:  dns.TypeAAAA,
 					QClass: dns.ClassINET}); ok {
@@ -255,7 +252,7 @@ ResolveLoop:
 				r.logger.Info("No glue record available for NS record, query for it", "ns", ns.Ns)
 
 				// use sub resolver to get the glue record
-				subResolver := NewResolver(r.ctx, r.rootLogger, r.globalCache, r.globalThrottle, ns.Ns, dns.TypeA)
+				subResolver := NewResolver(r.ctx, r.rootLogger, r.globalThrottle, ns.Ns, dns.TypeA)
 				subResults, subErr := subResolver.Resolve(depth+1, seen)
 				if subErr != nil {
 					return nil, fmt.Errorf("fail to do subquery for %s: %e", ns.Ns, subErr)
@@ -271,7 +268,7 @@ ResolveLoop:
 				// Store the subquery result to local cache and global cache
 				for _, glue := range subResults {
 					currentZone.addGlue(glue)
-					r.globalCache.AddRR(glue, true)
+					rr_cache.Global().AddRR(glue, true)
 				}
 
 				r.handleRRSetQuery(currentZone, ns.Ns, subResults)
@@ -470,7 +467,7 @@ func (r *Resolver) sendQuery(remoteIP string) (time.Duration, error) {
 		// If this is the final answer, add it to the local cache and global cache
 		if rr.Header().Rrtype == r.qType && rr.Header().Name == r.domain {
 			r.answers = append(r.answers, rr) // Add answer to local cache
-			r.globalCache.AddRR(rr, true)     // Add answer to global cache
+			rr_cache.Global().AddRR(rr, true) // Add answer to global cache
 			getAnswer = true
 			r.logger.Info("Get answer during query", "answer", rr.String())
 			continue
@@ -480,7 +477,7 @@ func (r *Resolver) sendQuery(remoteIP string) (time.Duration, error) {
 		if cname, ok := rr.(*dns.CNAME); ok && rr.Header().Name == r.domain {
 			r.logger.Info("Get CNAME record during query", "cname", cname.Target)
 			getAnswer = true
-			r.globalCache.AddRR(rr, true)
+			rr_cache.Global().AddRR(rr, true)
 			continue
 		}
 
@@ -491,7 +488,7 @@ func (r *Resolver) sendQuery(remoteIP string) (time.Duration, error) {
 		}
 		// Check if glue record is in bailiwick
 		if dns.IsSubDomain(currentZone.name, dns.Fqdn(rr.Header().Name)) {
-			r.globalCache.AddRR(rr, true)
+			rr_cache.Global().AddRR(rr, true)
 		}
 		currentZone.addGlue(rr)
 	}
@@ -523,7 +520,7 @@ func (r *Resolver) sendQuery(remoteIP string) (time.Duration, error) {
 		}
 		// Check if glue record is in bailiwick
 		if dns.IsSubDomain(currentZone.name, dns.Fqdn(rr.Header().Name)) {
-			r.globalCache.AddRR(rr, true)
+			rr_cache.Global().AddRR(rr, true)
 		}
 		currentZone.addGlue(rr)
 	}

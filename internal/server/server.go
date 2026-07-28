@@ -12,6 +12,7 @@ import (
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/config"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/request_throttle"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/resolver"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/root_hints"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/rr_cache"
 	"github.com/miekg/dns"
 )
@@ -34,9 +35,6 @@ type Server struct {
 
 	// blocked domains
 	blocked *blocklist.Blocklist
-
-	// global cache
-	cache *rr_cache.Cache
 
 	// signal to tell the request to send a query to the remote server
 	throttle *request_throttle.RequestThrottle
@@ -62,13 +60,15 @@ func NewDNSServer(parent context.Context, logger *slog.Logger) *Server {
 		insideReceiveQueue: make(chan Entry, queueSize),
 
 		blocked: blocklist.New(nil),
-		cache:   rr_cache.NewCache(ctx, logger),
 
 		throttle: request_throttle.NewRequestThrottle(ctx, 0),
 	}
 
+	// start a global RR cache
+	rr_cache.StartGlobal(ctx, logger)
+
 	// load root hints
-	server.loadRootHints(ctx)
+	root_hints.Load(ctx, logger, rr_cache.Global())
 
 	// handle DNS requests and responses
 	server.insideRequestHandler()
@@ -206,7 +206,7 @@ func (s *Server) insideRequestHandler() {
 
 				// Resolve the request
 				go func() {
-					newResolver := resolver.NewResolver(s.ctx, s.logger, s.cache, s.throttle, question.Name, question.Qtype)
+					newResolver := resolver.NewResolver(s.ctx, s.logger, s.throttle, question.Name, question.Qtype)
 					result, err := newResolver.Resolve(1, make(map[string]bool))
 					if err != nil {
 						s.logger.Error("Fail to resolve DNS request",
@@ -340,5 +340,5 @@ func (s *Server) ListBlocked() string {
 }
 
 func (s *Server) ListCache() string {
-	return s.cache.ToString()
+	return rr_cache.Global().ToString()
 }
