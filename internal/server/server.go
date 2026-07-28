@@ -22,10 +22,9 @@ const (
 )
 
 type Server struct {
-	ctx        context.Context
-	cancel     context.CancelFunc
-	logger     *slog.Logger
-	rootLogger *slog.Logger
+	ctx    context.Context
+	cancel context.CancelFunc
+	logger *slog.Logger
 
 	// inside
 	udpConnIPv4        *net.UDPConn
@@ -48,10 +47,9 @@ func NewDNSServer(parent context.Context, logger *slog.Logger) *Server {
 	ctx, cancel := context.WithCancel(parent)
 
 	server := &Server{
-		ctx:        ctx,
-		cancel:     cancel,
-		logger:     logger.With("module", "dns-server"),
-		rootLogger: logger,
+		ctx:    ctx,
+		cancel: cancel,
+		logger: logger.With("module", "dns-server"),
 
 		insideSendQueue:    make(chan Entry, queueSize),
 		insideReceiveQueue: make(chan Entry, queueSize),
