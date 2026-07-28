@@ -9,8 +9,10 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
-	"github.com/ShawnSjl/DNS-Resolver/internal/server/dns"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/capability"
 	_interface "github.com/ShawnSjl/DNS-Resolver/internal/server/interface"
 )
 
@@ -57,10 +59,15 @@ func main() {
 	handler := slog.NewTextHandler(os.Stdout, opts)
 	logger := slog.New(handler)
 
+	// start network capability service
+	capability.Start(rootCtx, logger, 30*time.Second)
+
 	// create DNS server
-	dnsServer := dns.NewDNSServer(rootCtx, logger)
+	dnsServer := server.NewDNSServer(rootCtx, logger)
 	dnsServer.RunIPv4(uint16(dnsPort)) // run DNS server in IPv4
-	dnsServer.RunIPv6(uint16(dnsPort)) // run DNS server in IPv6
+	if capability.HasIPv6Stack() {
+		dnsServer.RunIPv6(uint16(dnsPort)) // run DNS server in IPv6
+	}
 
 	// handle message from controller interface
 	logger.Info("DNS server is running",
