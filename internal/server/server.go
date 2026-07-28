@@ -1,4 +1,4 @@
-package dns
+package server
 
 import (
 	"context"
@@ -7,31 +7,24 @@ import (
 	"log/slog"
 	"net"
 	"strings"
-	"sync/atomic"
 
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/blocklist"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/config"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/request_throttle"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/resolver"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/root_hints"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server/rr_cache"
 	"github.com/miekg/dns"
 )
 
 const (
-	MTU            = 1500
-	UDPHeaderSize  = 8
-	IPv4HeaderSize = 20
-	IPv6HeaderSize = 40
-	UDP4MTU        = MTU - IPv4HeaderSize - UDPHeaderSize
-	UDP6MTU        = MTU - IPv6HeaderSize - UDPHeaderSize
-
 	queueSize = 1024
 )
 
 type Server struct {
-	ctx        context.Context
-	cancel     context.CancelFunc
-	logger     *slog.Logger
-	rootLogger *slog.Logger
-
-	supportIPv6 atomic.Bool
+	ctx    context.Context
+	cancel context.CancelFunc
+	logger *slog.Logger
 
 	// inside
 	udpConnIPv4        *net.UDPConn
@@ -41,12 +34,6 @@ type Server struct {
 
 	// blocked domains
 	blocked *blocklist.Blocklist
-
-	// global cache
-	cache *RecordCache
-
-	// signal to tell the request to send a query to the remote server
-	throttle *request_throttle.RequestThrottle
 }
 
 type Entry struct {
@@ -60,73 +47,30 @@ func NewDNSServer(parent context.Context, logger *slog.Logger) *Server {
 	ctx, cancel := context.WithCancel(parent)
 
 	server := &Server{
-		ctx:        ctx,
-		cancel:     cancel,
-		logger:     logger.With("module", "dns-server"),
-		rootLogger: logger,
-
-		supportIPv6: atomic.Bool{},
+		ctx:    ctx,
+		cancel: cancel,
+		logger: logger.With("module", "dns-server"),
 
 		insideSendQueue:    make(chan Entry, queueSize),
 		insideReceiveQueue: make(chan Entry, queueSize),
 
 		blocked: blocklist.New(nil),
-		cache:   newRecordCache(ctx, logger),
-
-		throttle: request_throttle.NewRequestThrottle(ctx, 0),
 	}
 
+	// start a global RR cache
+	rr_cache.StartGlobal(ctx, logger)
+
 	// load root hints
-	server.loadRootHints(ctx)
+	root_hints.Load(ctx, logger, rr_cache.Global())
+
+	// start a global request throttle
+	request_throttle.StartGlobal(ctx, 0)
 
 	// handle DNS requests and responses
 	server.insideRequestHandler()
 	server.insideResponseHandler()
 
-	// check IPv6 support
-	server.supportIPv6.Store(checkIPv6Support())
-
 	return server
-}
-
-func checkIPv6Support() bool {
-	// Get all network interfaces
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		log.Fatal("Fail to get network interfaces: ", err)
-	}
-
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 {
-			continue
-		}
-
-		if iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-
-		// Get all addresses of the interface
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-
-		for _, addr := range addrs {
-			var ip net.IP
-
-			switch v := addr.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			}
-
-			if ip != nil && ip.To4() == nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // ******************** Server **********************
@@ -143,7 +87,7 @@ func (s *Server) RunIPv4(port uint16) {
 	}
 	s.udpConnIPv4 = conn
 
-	s.readFromConn(conn, UDP4MTU)
+	s.readFromConn(conn, config.UDP4MTU)
 }
 
 func (s *Server) RunIPv6(port uint16) {
@@ -158,7 +102,7 @@ func (s *Server) RunIPv6(port uint16) {
 	}
 	s.udpConnIPv6 = conn
 
-	s.readFromConn(conn, UDP6MTU)
+	s.readFromConn(conn, config.UDP6MTU)
 }
 
 func (s *Server) readFromConn(conn *net.UDPConn, mtu int) {
@@ -258,8 +202,8 @@ func (s *Server) insideRequestHandler() {
 
 				// Resolve the request
 				go func() {
-					resolver := NewResolver(s, question.Name, question.Qtype)
-					result, err := resolver.resolve(1, make(map[string]bool))
+					newResolver := resolver.NewResolver(s.ctx, s.logger, question.Name, question.Qtype)
+					result, err := newResolver.Resolve(1, make(map[string]bool))
 					if err != nil {
 						s.logger.Error("Fail to resolve DNS request",
 							"err", err,
@@ -392,5 +336,5 @@ func (s *Server) ListBlocked() string {
 }
 
 func (s *Server) ListCache() string {
-	return s.cache.toString()
+	return rr_cache.Global().ToString()
 }

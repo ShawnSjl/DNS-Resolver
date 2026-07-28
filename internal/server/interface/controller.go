@@ -9,10 +9,10 @@ import (
 	"strings"
 
 	"github.com/ShawnSjl/DNS-Resolver/internal/protocol"
-	"github.com/ShawnSjl/DNS-Resolver/internal/server/dns"
+	"github.com/ShawnSjl/DNS-Resolver/internal/server"
 )
 
-func Serve(ctx context.Context, logger *slog.Logger, server *dns.Server, port int) {
+func Serve(ctx context.Context, logger *slog.Logger, server *server.Server, port int) {
 	defer func() {
 		slog.Info("DNS controller interface exited")
 	}()
@@ -54,7 +54,7 @@ func Serve(ctx context.Context, logger *slog.Logger, server *dns.Server, port in
 	}
 }
 
-func handleConn(ctx context.Context, logger *slog.Logger, server *dns.Server, conn *net.TCPConn) {
+func handleConn(ctx context.Context, logger *slog.Logger, server *server.Server, conn *net.TCPConn) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -93,7 +93,7 @@ func handleConn(ctx context.Context, logger *slog.Logger, server *dns.Server, co
 	}
 }
 
-func execute(server *dns.Server, req *protocol.Message) (protocol.MessageType, string) {
+func execute(server *server.Server, req *protocol.Message) (protocol.MessageType, string) {
 	// Validate first, then call into the server.
 	switch req.MsgType {
 	case protocol.MsgBlockAdd:

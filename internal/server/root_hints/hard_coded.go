@@ -57,11 +57,11 @@ var rootHintsAAAA = []dns.AAAA{
 	{Hdr: dns.RR_Header{Name: "m.root-servers.net.", Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: rootTTL}, AAAA: net.ParseIP("2001:dc3::35")},
 }
 
-func GetHardCodedRootHints() (ns []dns.RR, a []dns.RR, aaaa []dns.RR, time time.Time) {
-	return NSToRRSlice(rootHintsNS), AToRRSlice(rootHintsA), AAAAToRRSlice(rootHintsAAAA), hardCodedTime
+func getHardCodedRootHints() (ns []dns.RR, a []dns.RR, aaaa []dns.RR, time time.Time) {
+	return nsToRRSlice(rootHintsNS), aToRRSlice(rootHintsA), aaaaToRRSlice(rootHintsAAAA), hardCodedTime
 }
 
-func NSToRRSlice(nsList []dns.NS) []dns.RR {
+func nsToRRSlice(nsList []dns.NS) []dns.RR {
 	rrList := make([]dns.RR, len(nsList))
 	for i := range nsList {
 		rrList[i] = &nsList[i]
@@ -69,7 +69,7 @@ func NSToRRSlice(nsList []dns.NS) []dns.RR {
 	return rrList
 }
 
-func AToRRSlice(aList []dns.A) []dns.RR {
+func aToRRSlice(aList []dns.A) []dns.RR {
 	rrList := make([]dns.RR, len(aList))
 	for i := range aList {
 		rrList[i] = &aList[i]
@@ -77,7 +77,7 @@ func AToRRSlice(aList []dns.A) []dns.RR {
 	return rrList
 }
 
-func AAAAToRRSlice(aaaaList []dns.AAAA) []dns.RR {
+func aaaaToRRSlice(aaaaList []dns.AAAA) []dns.RR {
 	rrList := make([]dns.RR, len(aaaaList))
 	for i := range aaaaList {
 		rrList[i] = &aaaaList[i]

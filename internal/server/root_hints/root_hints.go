@@ -15,7 +15,7 @@ import (
 const rootHintsURL = "https://www.internic.net/domain/named.root"
 const rootTTL = math.MaxUint32
 
-func FetchRootHints(ctx context.Context) (ns []dns.RR, a []dns.RR, aaaa []dns.RR, err error) {
+func fetchRootHints(ctx context.Context) (ns []dns.RR, a []dns.RR, aaaa []dns.RR, err error) {
 	// set timeout for request
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()

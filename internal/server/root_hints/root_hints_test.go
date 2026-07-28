@@ -8,7 +8,7 @@ import (
 
 func TestRootHints(t *testing.T) {
 	ctx := context.Background()
-	ns, a, aaaa, err := FetchRootHints(ctx)
+	ns, a, aaaa, err := fetchRootHints(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
