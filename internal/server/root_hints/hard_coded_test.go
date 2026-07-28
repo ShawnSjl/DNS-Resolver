@@ -6,7 +6,7 @@ import (
 )
 
 func TestHardCodedRootHints(t *testing.T) {
-	ns, a, aaaa, when := GetHardCodedRootHints()
+	ns, a, aaaa, when := getHardCodedRootHints()
 	for _, nsRr := range ns {
 		log.Println(nsRr.String())
 	}
