@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -15,19 +16,54 @@ const (
 	MaxTTL = 60 * 60 * 24 * 7 // maximum TTL in seconds, 7 days
 )
 
+var (
+	globalCache atomic.Pointer[Cache]
+	startOnce   sync.Once
+)
+
 type Cache struct {
 	ctx    context.Context
+	cancel context.CancelFunc
 	logger *slog.Logger
 
 	rrSets map[SetKey]*WeightedRRSet
 	mutex  sync.RWMutex
+
+	closeOnce sync.Once
 }
 
+// ******************** Global Cache Interface **********************
+
+func StartGlobal(parent context.Context, logger *slog.Logger) {
+	startOnce.Do(func() {
+		globalCache.Store(NewCache(parent, logger))
+	})
+}
+
+func Global() *Cache {
+	cache := globalCache.Load()
+	if cache == nil {
+		panic("Cache not started")
+	}
+	return cache
+}
+
+// ******************** Normal Interface **********************
+
 func NewCache(parent context.Context, logger *slog.Logger) *Cache {
-	ctx := context.WithoutCancel(parent)
+	if parent == nil {
+		parent = context.Background()
+	}
+
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	ctx, cancel := context.WithCancel(parent)
 
 	cache := &Cache{
 		ctx:    ctx,
+		cancel: cancel,
 		logger: logger.WithGroup("rr_cache"),
 		rrSets: make(map[SetKey]*WeightedRRSet),
 		mutex:  sync.RWMutex{},
@@ -36,6 +72,10 @@ func NewCache(parent context.Context, logger *slog.Logger) *Cache {
 	go cache.ttlTimer()
 
 	return cache
+}
+
+func (c *Cache) Close() {
+	c.closeOnce.Do(c.cancel)
 }
 
 func (c *Cache) ttlTimer() {
