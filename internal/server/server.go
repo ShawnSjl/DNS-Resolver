@@ -17,28 +17,17 @@ import (
 	"github.com/miekg/dns"
 )
 
-const (
-	queueSize = 1024
-)
-
 type Server struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	logger *slog.Logger
 
 	// inside
-	udpConnIPv4        *net.UDPConn
-	udpConnIPv6        *net.UDPConn
-	insideSendQueue    chan Entry
-	insideReceiveQueue chan Entry
+	udpConnIPv4 *net.UDPConn
+	udpConnIPv6 *net.UDPConn
 
 	// blocked domains
 	blocked *blocklist.Blocklist
-}
-
-type Entry struct {
-	msg  *dns.Msg
-	addr net.Addr
 }
 
 // ******************** Initialization Interface **********************
@@ -51,9 +40,6 @@ func NewDNSServer(parent context.Context, logger *slog.Logger) *Server {
 		cancel: cancel,
 		logger: logger.With("module", "dns-server"),
 
-		insideSendQueue:    make(chan Entry, queueSize),
-		insideReceiveQueue: make(chan Entry, queueSize),
-
 		blocked: blocklist.New(nil),
 	}
 
@@ -65,10 +51,6 @@ func NewDNSServer(parent context.Context, logger *slog.Logger) *Server {
 
 	// start a global request throttle
 	request_throttle.StartGlobal(ctx, 0)
-
-	// handle DNS requests and responses
-	server.insideRequestHandler()
-	server.insideResponseHandler()
 
 	return server
 }
@@ -136,12 +118,8 @@ func (s *Server) readFromConn(conn *net.UDPConn, mtu int) {
 					continue
 				}
 
-				// Send the message to the queue
-				reqEntry := Entry{
-					msg:  &msg,
-					addr: addr,
-				}
-				s.insideReceiveQueue <- reqEntry
+				// Handle the DNS request in a new goroutine
+				go s.insideRequestHandler(addr, &msg)
 			}
 		}
 	}()
@@ -169,111 +147,75 @@ func (s *Server) Terminate() {
 
 // ******************** Inside DNS Request Handler **********************
 
-func (s *Server) insideRequestHandler() {
-	// goroutine to handle the outgoing DNS requests
-	go func() {
-		for {
-			select {
-			case <-s.ctx.Done():
-				return
+func (s *Server) insideRequestHandler(addr net.Addr, req *dns.Msg) {
+	// Check if the message is a DNS query
+	if len(req.Question) == 0 {
+		s.handleFormatError(addr, req)
+		return
+	}
 
-			case reqEntry := <-s.insideReceiveQueue:
-				// Check if the message is a DNS query
-				if len(reqEntry.msg.Question) == 0 {
-					s.handleFormatError(reqEntry.addr, reqEntry.msg)
-					continue
-				}
+	// Get question from the message
+	question := req.Question[0]
+	s.logger.Info("Received DNS request",
+		"question", question.String(),
+		"addr", addr.String(),
+	)
 
-				// Get question from the message
-				question := reqEntry.msg.Question[0]
+	// Check if the domain is blocked
+	if s.blocked.Contains(question.Name) {
+		s.handleBlocked(addr, req)
+		return
+	}
 
-				s.logger.Info("Received DNS request",
-					"question", question.String(),
-					"addr", reqEntry.addr.String(),
-				)
+	// TODO: new feature: support custom record for local network
 
-				// Check if the domain is blocked
-				if s.blocked.Contains(question.Name) {
-					s.handleBlocked(reqEntry.addr, reqEntry.msg)
-					continue
-				}
-
-				// TODO: new feature: support custom record for local network
-
-				// Resolve the request
-				go func() {
-					newResolver := resolver.NewResolver(s.ctx, s.logger, question.Name, question.Qtype)
-					result, err := newResolver.Resolve(1, make(map[string]bool))
-					if err != nil {
-						s.logger.Error("Fail to resolve DNS request",
-							"err", err,
-							"question", question.String(),
-							"addr", reqEntry.addr.String(),
-						)
-						return
-					}
-
-					// Form a response message
-					resp := dns.Msg{}
-					resp.SetReply(reqEntry.msg)
-					for _, rr := range result {
-						resp.Answer = append(resp.Answer, rr)
-					}
-
-					// If answer is empty, return NXDOMAIN
-					if len(resp.Answer) == 0 {
-						resp.Rcode = dns.RcodeNameError
-					}
-					entry := Entry{
-						msg:  &resp,
-						addr: reqEntry.addr,
-					}
-					s.insideSendQueue <- entry
-				}()
-			}
-		}
-	}()
+	// Resolve the request
+	s.handleNormalCase(addr, req, question)
 }
 
 func (s *Server) handleFormatError(addr net.Addr, req *dns.Msg) {
-	// create a response message
+	// create a response message with format error
 	resp := dns.Msg{}
 	resp.SetReply(req)
 	resp.Rcode = dns.RcodeFormatError
 
-	entry := Entry{
-		msg:  &resp,
-		addr: addr,
-	}
-	s.insideSendQueue <- entry
+	s.sendResponse(addr, &resp)
 }
 
 func (s *Server) handleBlocked(addr net.Addr, req *dns.Msg) {
+	// create a response message with non-existent domain
 	resp := dns.Msg{}
 	resp.SetReply(req)
 	resp.Rcode = dns.RcodeNameError
 
-	entry := Entry{
-		msg:  &resp,
-		addr: addr,
-	}
-	s.insideSendQueue <- entry
+	s.sendResponse(addr, &resp)
 }
 
-// ******************** Inside DNS Response Handler **********************
+func (s *Server) handleNormalCase(addr net.Addr, req *dns.Msg, question dns.Question) {
+	// Resolve the request
+	newResolver := resolver.NewResolver(s.ctx, s.logger, question.Name, question.Qtype)
+	result, err := newResolver.Resolve(1, make(map[string]bool))
+	if err != nil {
+		s.logger.Error("Fail to resolve DNS request",
+			"err", err,
+			"question", question.String(),
+			"addr", addr.String(),
+		)
+		return
+	}
 
-func (s *Server) insideResponseHandler() {
-	go func() {
-		for {
-			select {
-			case <-s.ctx.Done():
-				return
+	// Form a response message with the resolved records
+	resp := dns.Msg{}
+	resp.SetReply(req)
+	for _, rr := range result {
+		resp.Answer = append(resp.Answer, rr)
+	}
 
-			case entry := <-s.insideSendQueue:
-				s.sendResponse(entry.addr, entry.msg)
-			}
-		}
-	}()
+	// If answer is empty, return NXDOMAIN
+	if len(resp.Answer) == 0 {
+		resp.Rcode = dns.RcodeNameError
+	}
+	s.sendResponse(addr, &resp)
 }
 
 func (s *Server) sendResponse(addr net.Addr, resp *dns.Msg) {
