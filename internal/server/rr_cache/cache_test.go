@@ -21,19 +21,15 @@ func TestCache_AddRR(t *testing.T) {
 		A: net.ParseIP("0.0.0.0")}
 
 	// Add a RR
-	cache.AddRR(&fakeRR, false)
+	if ok := cache.AddRR(&fakeRR, false); !ok {
+		t.Error("Failed to add RR")
+	}
 
 	// Wait 1 second
 	timer := time.Tick(1 * time.Second)
 	<-timer
 
-	key := SetKey{
-		Domain: "example.com.",
-		QType:  dns.TypeA,
-		QClass: dns.ClassINET,
-	}
-
-	wSet, ok := cache.GetWeightedRRSet(key)
+	wSet, ok := cache.GetWeightedRRSet("example.com.", dns.TypeA, dns.ClassINET)
 	if !ok {
 		t.Error("Cache miss")
 	}
@@ -62,16 +58,14 @@ func TestCache_AddRR_LimitTTL(t *testing.T) {
 		A: net.ParseIP("0.0.0.1")}
 
 	// Add a RR
-	cache.AddRR(&fakeRR, true)
-	cache.AddRR(&fakeRR2, false)
-
-	key := SetKey{
-		Domain: "example.com.",
-		QType:  dns.TypeA,
-		QClass: dns.ClassINET,
+	if ok := cache.AddRR(&fakeRR, true); !ok {
+		t.Error("Failed to add RR")
+	}
+	if ok := cache.AddRR(&fakeRR2, false); !ok {
+		t.Error("Failed to add RR")
 	}
 
-	wSet, ok := cache.GetWeightedRRSet(key)
+	wSet, ok := cache.GetWeightedRRSet("example.com.", dns.TypeA, dns.ClassINET)
 	if !ok {
 		t.Error("Cache miss")
 	}
@@ -104,19 +98,15 @@ func TestCache_AddRR_TTL_Zero(t *testing.T) {
 		A: net.ParseIP("0.0.0.0")}
 
 	// Add a RR
-	cache.AddRR(&fakeRR, false)
+	if ok := cache.AddRR(&fakeRR, true); !ok {
+		t.Error("Failed to add RR")
+	}
 
 	// Wait 1 second
 	timer := time.Tick(2 * time.Second)
 	<-timer
 
-	key := SetKey{
-		Domain: "example.com.",
-		QType:  dns.TypeA,
-		QClass: dns.ClassINET,
-	}
-
-	_, ok := cache.GetWeightedRRSet(key)
+	_, ok := cache.GetWeightedRRSet("example.com.", dns.TypeA, dns.ClassINET)
 	if ok {
 		t.Error("RR set should be expired, but not")
 	}
@@ -133,16 +123,14 @@ func TestCache_PicksCorrectRR(t *testing.T) {
 		A: net.ParseIP("0.0.0.1")}
 
 	// Add a RR
-	cache.AddRR(&fakeRR, true)
-	cache.AddRR(&fakeRR2, true)
-
-	key := SetKey{
-		Domain: "example.com.",
-		QType:  dns.TypeA,
-		QClass: dns.ClassINET,
+	if ok := cache.AddRR(&fakeRR, true); !ok {
+		t.Error("Failed to add RR")
+	}
+	if ok := cache.AddRR(&fakeRR2, true); !ok {
+		t.Error("Failed to add RR")
 	}
 
-	wSet, ok := cache.GetWeightedRRSet(key)
+	wSet, ok := cache.GetWeightedRRSet("example.com.", dns.TypeA, dns.ClassINET)
 	if !ok {
 		t.Error("Cache miss")
 	}
@@ -163,5 +151,62 @@ func TestCache_PicksCorrectRR(t *testing.T) {
 	}
 	if wRR == wRR2 {
 		t.Error("RRs should not be the same")
+	}
+}
+
+func TestCache_CNAME_1(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	cache := NewCache(ctx, logger)
+
+	var fakeRR = dns.A{Hdr: dns.RR_Header{Name: "www.example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+		A: net.ParseIP("0.0.0.0")}
+	var fakeCNAME = dns.CNAME{Hdr: dns.RR_Header{Name: "www.example.com.", Rrtype: dns.TypeCNAME, Class: dns.ClassINET,
+		Ttl: 300}, Target: "example.com."}
+
+	// Add a RR
+	if ok := cache.AddRR(&fakeRR, true); !ok {
+		t.Error("Failed to add RR")
+	}
+	if ok := cache.AddRR(&fakeCNAME, true); ok {
+		t.Error("CNAME should not be added to cache")
+	}
+}
+
+func TestCache_CNAME_2(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	cache := NewCache(ctx, logger)
+
+	var fakeRR = dns.A{Hdr: dns.RR_Header{Name: "www.example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+		A: net.ParseIP("0.0.0.0")}
+	var fakeCNAME = dns.CNAME{Hdr: dns.RR_Header{Name: "www.example.com.", Rrtype: dns.TypeCNAME, Class: dns.ClassINET,
+		Ttl: 300}, Target: "example.com."}
+
+	// Add a RR
+	if ok := cache.AddRR(&fakeCNAME, true); !ok {
+		t.Error("Failed to add CNAME")
+	}
+	if ok := cache.AddRR(&fakeRR, true); ok {
+		t.Error("RR should not be added to cache")
+	}
+}
+
+func TestCache_CNAME_3(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	cache := NewCache(ctx, logger)
+
+	var fakeCNAME = dns.CNAME{Hdr: dns.RR_Header{Name: "www.example.com.", Rrtype: dns.TypeCNAME, Class: dns.ClassINET,
+		Ttl: 300}, Target: "example.com."}
+	var fakeCNAME2 = dns.CNAME{Hdr: dns.RR_Header{Name: "www.example.com.", Rrtype: dns.TypeCNAME, Class: dns.ClassINET,
+		Ttl: 300}, Target: "example.com."}
+
+	// Add a RR
+	if ok := cache.AddRR(&fakeCNAME, true); !ok {
+		t.Error("Failed to add CNAME")
+	}
+	if ok := cache.AddRR(&fakeCNAME2, true); !ok {
+		t.Error("Failed to add CNAME")
 	}
 }

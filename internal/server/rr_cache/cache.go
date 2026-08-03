@@ -26,7 +26,7 @@ type Cache struct {
 	cancel context.CancelFunc
 	logger *slog.Logger
 
-	rrSets map[SetKey]*WeightedRRSet
+	rrSets map[setKey]*WeightedRRSet
 	mutex  sync.RWMutex
 
 	closeOnce sync.Once
@@ -65,7 +65,7 @@ func NewCache(parent context.Context, logger *slog.Logger) *Cache {
 		ctx:    ctx,
 		cancel: cancel,
 		logger: logger.WithGroup("rr_cache"),
-		rrSets: make(map[SetKey]*WeightedRRSet),
+		rrSets: make(map[setKey]*WeightedRRSet),
 		mutex:  sync.RWMutex{},
 	}
 
@@ -118,48 +118,90 @@ func (c *Cache) ttlTimer() {
 	}
 }
 
-func (c *Cache) GetWeightedRRSet(rrSetKey SetKey) (*WeightedRRSet, bool) {
+func (c *Cache) GetWeightedRRSet(domain string, qType uint16, qClass uint16) (*WeightedRRSet, bool) {
+	// Get RRSet key
+	key := setKey{
+		Domain: domain,
+		QType:  qType,
+		QClass: qClass,
+	}
+
+	// Lock cache
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
-	set, ok := c.rrSets[rrSetKey]
+	set, ok := c.rrSets[key]
 
 	if ok {
-		slog.Debug("Cache hit", "domain", rrSetKey.Domain, "qType", rrSetKey.QType)
+		slog.Debug("Cache hit", "domain", key.Domain, "qType", key.QType)
 	} else {
-		slog.Debug("Cache miss", "domain", rrSetKey.Domain, "qType", rrSetKey.QType)
+		slog.Debug("Cache miss", "domain", key.Domain, "qType", key.QType)
 	}
 
 	return set, ok
 }
 
-func (c *Cache) AddRR(rr dns.RR, limitTTL bool) {
+func (c *Cache) AddRR(rr dns.RR, limitTTL bool) bool {
+	header := rr.Header()
+
+	// Get RRSet key
+	key := setKey{
+		Domain: header.Name,
+		QType:  header.Rrtype,
+		QClass: header.Class,
+	}
+
+	// Lock cache
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	setKey := SetKey{
-		Domain: rr.Header().Name,
-		QType:  rr.Header().Rrtype,
-		QClass: rr.Header().Class,
+	// CNAMEs can't be cached with other records in the same domain
+	if !c.canAddRR(rr) {
+		slog.Warn("CNAME can't be cached with other records in the same domain", "rr", rr.String())
+		return false
 	}
 
 	// Limit TTL to 7 days
 	if limitTTL {
-		rr.Header().Ttl = min(rr.Header().Ttl, MaxTTL) // limit TTL to 7 days
+		header.Ttl = min(header.Ttl, MaxTTL) // limit TTL to 7 days
 	}
 
 	// Create RRSet if it doesn't exist'
-	if _, ok := c.rrSets[setKey]; !ok {
-		c.rrSets[setKey] = &WeightedRRSet{
+	if _, ok := c.rrSets[key]; !ok {
+		c.rrSets[key] = &WeightedRRSet{
 			mutex: sync.RWMutex{},
 			rrs:   make(map[string]*weightedRR),
 		}
 	}
 
 	// Add RR to RRSet
-	c.rrSets[setKey].addRR(rr)
-
+	c.rrSets[key].addRR(rr)
 	slog.Debug("Added RR to cache", "rr", rr.String())
+
+	return true
+}
+
+// canAddRR returns true if the RR can be added to the cache, false otherwise.
+// CNAMEs can't be cached with other records in the same domain.
+// Function should be called after requiring the cache lock.
+func (c *Cache) canAddRR(rr dns.RR) bool {
+	header := rr.Header()
+	isCNAME := header.Rrtype == dns.TypeCNAME
+
+	for key := range c.rrSets {
+		if key.Domain != header.Name || key.QClass != header.Class {
+			continue
+		}
+
+		existingIsCNAME := key.QType == dns.TypeCNAME
+
+		// if one is CNAME and the other is not, return false
+		if isCNAME != existingIsCNAME {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (c *Cache) ToString() string {

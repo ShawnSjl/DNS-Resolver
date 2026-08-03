@@ -90,12 +90,7 @@ func (r *Resolver) createRootZone(logger *slog.Logger) *zone {
 	}
 
 	// Get NS record of root from cache
-	rootNsKey := rr_cache.SetKey{
-		Domain: ".",
-		QType:  dns.TypeNS,
-		QClass: dns.ClassINET,
-	}
-	if rootNsSet, ok := rr_cache.Global().GetWeightedRRSet(rootNsKey); ok {
+	if rootNsSet, ok := rr_cache.Global().GetWeightedRRSet(".", dns.TypeNS, dns.ClassINET); ok {
 		rootZone.ns = append(rootZone.ns, rootNsSet.RRs()...)
 	}
 
@@ -104,22 +99,12 @@ func (r *Resolver) createRootZone(logger *slog.Logger) *zone {
 		switch ns := rootNS.(type) {
 		case *dns.NS:
 			// Get A record of root-servers.net from cache
-			rootAKey := rr_cache.SetKey{
-				Domain: ns.Ns,
-				QType:  dns.TypeA,
-				QClass: dns.ClassINET,
-			}
-			if rootA, ok := rr_cache.Global().GetWeightedRRSet(rootAKey); ok {
+			if rootA, ok := rr_cache.Global().GetWeightedRRSet(ns.Ns, dns.TypeA, dns.ClassINET); ok {
 				rootZone.glueA = append(rootZone.glueA, rootA.RRs()...)
 			}
 
 			// Get AAAA record of root-servers.net from cache
-			rootAAAAKey := rr_cache.SetKey{
-				Domain: ns.Ns,
-				QType:  dns.TypeA,
-				QClass: dns.ClassINET,
-			}
-			if rootAAAA, ok := rr_cache.Global().GetWeightedRRSet(rootAAAAKey); ok {
+			if rootAAAA, ok := rr_cache.Global().GetWeightedRRSet(ns.Ns, dns.TypeAAAA, dns.ClassINET); ok {
 				rootZone.glueAAAA = append(rootZone.glueAAAA, rootAAAA.RRs()...)
 			}
 		default:
@@ -159,20 +144,12 @@ ResolveLoop:
 			t0 := time.Now()
 
 			// Check if global cache has answers
-			if rrSet, ok := rr_cache.Global().GetWeightedRRSet(rr_cache.SetKey{
-				Domain: r.domain,
-				QType:  r.qType,
-				QClass: dns.ClassINET,
-			}); ok {
+			if rrSet, ok := rr_cache.Global().GetWeightedRRSet(r.domain, r.qType, dns.ClassINET); ok {
 				return rrSet.RRs(), nil
 			}
 
 			// Check if global cache has CNAME record, do subquery to get the answer
-			if rrSet, ok := rr_cache.Global().GetWeightedRRSet(rr_cache.SetKey{
-				Domain: r.domain,
-				QType:  dns.TypeCNAME,
-				QClass: dns.ClassINET,
-			}); ok {
+			if rrSet, ok := rr_cache.Global().GetWeightedRRSet(r.domain, dns.TypeCNAME, dns.ClassINET); ok {
 				var result []dns.RR
 				for _, rr := range rrSet.RRs() {
 					subResolver := NewResolver(r.ctx, r.rootLogger, rr.(*dns.CNAME).Target, r.qType)
@@ -230,17 +207,11 @@ ResolveLoop:
 			// If there is available glue record, handle the query directly
 			if len(glues) != 0 {
 				r.handleRRSetQuery(currentZone, ns.Ns, glues)
-			} else if cachedAGlue, ok := rr_cache.Global().GetWeightedRRSet(rr_cache.SetKey{
-				Domain: ns.Ns,
-				QType:  dns.TypeA,
-				QClass: dns.ClassINET}); ok {
+			} else if cachedAGlue, ok := rr_cache.Global().GetWeightedRRSet(ns.Ns, dns.TypeA, dns.ClassINET); ok {
 				// If there is no available glue record, try to get the A glue record from global cache
 				r.handleWeightRRSetQuery(currentZone, ns.Ns, cachedAGlue)
 			} else if capability.HasIPv6Stack() {
-				if cachedAAAAGlue, ok := rr_cache.Global().GetWeightedRRSet(rr_cache.SetKey{
-					Domain: ns.Ns,
-					QType:  dns.TypeAAAA,
-					QClass: dns.ClassINET}); ok {
+				if cachedAAAAGlue, ok := rr_cache.Global().GetWeightedRRSet(ns.Ns, dns.TypeAAAA, dns.ClassINET); ok {
 					// If there is no available glue record, try to get the AAAA glue record from global cache
 					r.handleWeightRRSetQuery(currentZone, ns.Ns, cachedAAAAGlue)
 				}

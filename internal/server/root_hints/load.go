@@ -2,6 +2,7 @@ package root_hints
 
 import (
 	"context"
+	"log"
 	"log/slog"
 	"time"
 
@@ -47,6 +48,8 @@ func Load(parent context.Context, logger *slog.Logger, cache *rr_cache.Cache) {
 
 func addRootHintsToCache(cache *rr_cache.Cache, rrs []dns.RR) {
 	for _, rr := range rrs {
-		cache.AddRR(rr, false)
+		if ok := cache.AddRR(rr, false); !ok {
+			log.Fatal("Failed to add root hint to cache")
+		}
 	}
 }
