@@ -26,8 +26,9 @@ type Cache struct {
 	cancel context.CancelFunc
 	logger *slog.Logger
 
-	rrSets map[setKey]*WeightedRRSet
-	mutex  sync.RWMutex
+	rrSets    map[setKey]*WeightedRRSet       // primary cache
+	nameTypes map[nameKey]map[uint16]struct{} // secondary cache for name -> qType
+	mutex     sync.RWMutex
 
 	closeOnce sync.Once
 }
@@ -62,11 +63,12 @@ func NewCache(parent context.Context, logger *slog.Logger) *Cache {
 	ctx, cancel := context.WithCancel(parent)
 
 	cache := &Cache{
-		ctx:    ctx,
-		cancel: cancel,
-		logger: logger.WithGroup("rr_cache"),
-		rrSets: make(map[setKey]*WeightedRRSet),
-		mutex:  sync.RWMutex{},
+		ctx:       ctx,
+		cancel:    cancel,
+		logger:    logger.WithGroup("rr_cache"),
+		rrSets:    make(map[setKey]*WeightedRRSet),
+		nameTypes: make(map[nameKey]map[uint16]struct{}),
+		mutex:     sync.RWMutex{},
 	}
 
 	go cache.ttlTimer()
@@ -109,7 +111,21 @@ func (c *Cache) ttlTimer() {
 
 				// If all records are expired, remove the RRSet
 				if len(rrSet.rrs) == 0 {
+					// Remove RRSet from primary cache
 					delete(c.rrSets, rrSetKey)
+
+					// Remove that type from nameTypes cache
+					nKey := nameKey{
+						domain: rrSetKey.domain,
+						qClass: rrSetKey.qClass,
+					}
+
+					types := c.nameTypes[nKey]
+					delete(types, rrSetKey.qType)
+
+					if len(types) == 0 {
+						delete(c.nameTypes, nKey)
+					}
 				}
 			}
 
@@ -121,9 +137,9 @@ func (c *Cache) ttlTimer() {
 func (c *Cache) GetWeightedRRSet(domain string, qType uint16, qClass uint16) (*WeightedRRSet, bool) {
 	// Get RRSet key
 	key := setKey{
-		Domain: domain,
-		QType:  qType,
-		QClass: qClass,
+		domain: domain,
+		qType:  qType,
+		qClass: qClass,
 	}
 
 	// Lock cache
@@ -133,9 +149,9 @@ func (c *Cache) GetWeightedRRSet(domain string, qType uint16, qClass uint16) (*W
 	set, ok := c.rrSets[key]
 
 	if ok {
-		slog.Debug("Cache hit", "domain", key.Domain, "qType", key.QType)
+		slog.Debug("Cache hit", "domain", key.domain, "qType", key.qType)
 	} else {
-		slog.Debug("Cache miss", "domain", key.Domain, "qType", key.QType)
+		slog.Debug("Cache miss", "domain", key.domain, "qType", key.qType)
 	}
 
 	return set, ok
@@ -146,9 +162,9 @@ func (c *Cache) AddRR(rr dns.RR, limitTTL bool) bool {
 
 	// Get RRSet key
 	key := setKey{
-		Domain: header.Name,
-		QType:  header.Rrtype,
-		QClass: header.Class,
+		domain: header.Name,
+		qType:  header.Rrtype,
+		qClass: header.Class,
 	}
 
 	// Lock cache
@@ -167,11 +183,27 @@ func (c *Cache) AddRR(rr dns.RR, limitTTL bool) bool {
 	}
 
 	// Create RRSet if it doesn't exist'
-	if _, ok := c.rrSets[key]; !ok {
+	if _, exist := c.rrSets[key]; !exist {
+		// Create RRSet
 		c.rrSets[key] = &WeightedRRSet{
 			mutex: sync.RWMutex{},
 			rrs:   make(map[string]*weightedRR),
 		}
+
+		// Update nameTypes cache
+		if c.nameTypes == nil {
+			c.nameTypes = make(map[nameKey]map[uint16]struct{})
+		}
+		nkey := nameKey{
+			domain: key.domain,
+			qClass: key.qClass,
+		}
+		types := c.nameTypes[nkey]
+		if types == nil {
+			types = make(map[uint16]struct{})
+			c.nameTypes[nkey] = types
+		}
+		types[key.qType] = struct{}{}
 	}
 
 	// Add RR to RRSet
@@ -186,22 +218,28 @@ func (c *Cache) AddRR(rr dns.RR, limitTTL bool) bool {
 // Function should be called after requiring the cache lock.
 func (c *Cache) canAddRR(rr dns.RR) bool {
 	header := rr.Header()
-	isCNAME := header.Rrtype == dns.TypeCNAME
 
-	for key := range c.rrSets {
-		if key.Domain != header.Name || key.QClass != header.Class {
-			continue
-		}
-
-		existingIsCNAME := key.QType == dns.TypeCNAME
-
-		// if one is CNAME and the other is not, return false
-		if isCNAME != existingIsCNAME {
-			return false
-		}
+	// Get name key
+	key := nameKey{
+		domain: header.Name,
+		qClass: header.Class,
 	}
 
-	return true
+	// Get all exists types of this domain, if empty, return true
+	types := c.nameTypes[key]
+	if len(types) == 0 {
+		return true
+	}
+
+	// If current RR is CNAME, return true if only CNAME exists
+	if header.Rrtype == dns.TypeCNAME {
+		_, onlyCNAME := types[dns.TypeCNAME]
+		return len(types) == 1 && onlyCNAME
+	}
+
+	// If current RR is not CNAME, return true if no CNAME exists
+	_, hasCNAME := types[dns.TypeCNAME]
+	return !hasCNAME
 }
 
 func (c *Cache) ToString() string {
@@ -209,8 +247,8 @@ func (c *Cache) ToString() string {
 	defer c.mutex.RUnlock()
 
 	var list []string
-	for setKey, rrSet := range c.rrSets {
-		list = append(list, fmt.Sprintf("RRSet: %s %d %d", setKey.Domain, setKey.QType, setKey.QClass))
+	for key, rrSet := range c.rrSets {
+		list = append(list, fmt.Sprintf("RRSet: %s %d %d", key.domain, key.qType, key.qClass))
 		for _, wRR := range rrSet.rrs {
 			list = append(list, wRR.rr.String())
 		}

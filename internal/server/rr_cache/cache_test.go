@@ -210,3 +210,37 @@ func TestCache_CNAME_3(t *testing.T) {
 		t.Error("Failed to add CNAME")
 	}
 }
+
+func TestCache_CNAME_4(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	cache := NewCache(ctx, logger)
+
+	var fakeRR = dns.A{Hdr: dns.RR_Header{Name: "www.example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 1},
+		A: net.ParseIP("0.0.0.0")}
+	var fakeCNAME = dns.CNAME{Hdr: dns.RR_Header{Name: "www.example.com.", Rrtype: dns.TypeCNAME, Class: dns.ClassINET,
+		Ttl: 1}, Target: "example.com."}
+
+	// Add a RR
+	if ok := cache.AddRR(&fakeRR, true); !ok {
+		t.Error("Failed to add RR")
+	}
+
+	// Wait 2 seconds
+	timer := time.Tick(2 * time.Second)
+	<-timer
+
+	// Add a CNAME when RR is expired
+	if ok := cache.AddRR(&fakeCNAME, true); !ok {
+		t.Error("Failed to add CNAME")
+	}
+
+	// Wait 2 seconds
+	timer = time.Tick(2 * time.Second)
+	<-timer
+
+	// Add a RR when CNAME is expired
+	if ok := cache.AddRR(&fakeRR, true); !ok {
+		t.Error("Failed to add RR")
+	}
+}
