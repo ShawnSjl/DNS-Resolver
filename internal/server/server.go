@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/ShawnSjl/DNS-Resolver/internal/protocol"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/blocklist"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/config"
 	"github.com/ShawnSjl/DNS-Resolver/internal/server/request_throttle"
@@ -28,6 +29,8 @@ type Server struct {
 
 	// blocked domains
 	blocked *blocklist.Blocklist
+
+	customCache *rr_cache.Cache
 }
 
 // ******************** Initialization Interface **********************
@@ -40,11 +43,12 @@ func NewDNSServer(parent context.Context, logger *slog.Logger) *Server {
 		cancel: cancel,
 		logger: logger.With("module", "dns-server"),
 
-		blocked: blocklist.New(nil),
+		blocked:     blocklist.New(nil),
+		customCache: rr_cache.NewCache(ctx, logger.With("module", "custom-cache")),
 	}
 
 	// start a global RR cache
-	rr_cache.StartGlobal(ctx, logger)
+	rr_cache.StartGlobal(ctx, logger.With("module", "global-cache"))
 
 	// load root hints
 	root_hints.Load(ctx, logger, rr_cache.Global())
@@ -279,4 +283,22 @@ func (s *Server) ListBlocked() string {
 
 func (s *Server) ListCache() string {
 	return rr_cache.Global().ToString()
+}
+
+// ListCustomRR exposes custom records to the controller. Storage is added in a
+// later step, so this currently returns the existing placeholder value.
+func (s *Server) ListCustomRR() string {
+	return ""
+}
+
+// AddCustomRR accepts the typed record decoded by the controller interface.
+// Persisting the record is intentionally deferred.
+func (s *Server) AddCustomRR(record protocol.CustomRR) bool {
+	return true
+}
+
+// RemoveCustomRR accepts the typed record decoded by the controller interface.
+// Removing the record is intentionally deferred.
+func (s *Server) RemoveCustomRR(record protocol.CustomRR) bool {
+	return true
 }

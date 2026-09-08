@@ -65,7 +65,7 @@ func NewCache(parent context.Context, logger *slog.Logger) *Cache {
 	cache := &Cache{
 		ctx:       ctx,
 		cancel:    cancel,
-		logger:    logger.WithGroup("rr_cache"),
+		logger:    logger,
 		rrSets:    make(map[setKey]*WeightedRRSet),
 		nameTypes: make(map[nameKey]map[uint16]struct{}),
 		mutex:     sync.RWMutex{},
